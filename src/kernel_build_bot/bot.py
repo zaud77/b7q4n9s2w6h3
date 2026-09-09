@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -377,7 +378,13 @@ class KernelBuildBot:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
+    # httpx logs the full Bot API URL, which contains the Telegram token.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     KernelBuildBot(Settings.from_env()).application().run_polling(drop_pending_updates=True)
 
 

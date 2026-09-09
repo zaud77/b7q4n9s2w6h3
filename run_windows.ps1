@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $envFile = Join-Path $projectDir ".env"
 $venvPython = Join-Path $projectDir ".venv\Scripts\python.exe"
+$logDir = Join-Path $projectDir "logs"
+$logFile = Join-Path $logDir "bot.log"
 
 if (-not (Test-Path -LiteralPath $envFile)) {
     throw "Missing $envFile. Copy .env.example to .env and fill in the secrets first."
@@ -27,4 +29,6 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Set-Location -LiteralPath $projectDir
-& $venvPython -m kernel_build_bot.bot
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+$ErrorActionPreference = "Continue"
+& $venvPython -m kernel_build_bot.bot *>> $logFile
