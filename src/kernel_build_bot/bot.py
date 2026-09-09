@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import re
+import secrets
+import shutil
 import sys
+import tempfile
+import time
+import zipfile
 from datetime import datetime, time as datetime_time, timedelta, timezone
+from pathlib import Path
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -90,6 +97,7 @@ class KernelBuildBot:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.db = Database(settings.database_path, settings.serial_pepper)
+        self._monitor_task: asyncio.Task | None = None
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.settings.admin_user_ids
@@ -323,6 +331,8 @@ class KernelBuildBot:
             # stale keyboards and forged callback payloads.
             inputs["self_config"] = "false"
         inputs["device_serial"] = serial
+        request_id = secrets.token_hex(8)
+        inputs["build_request_id"] = request_id
         if self.settings.github_use_gh_cli:
             args = [
                 "gh", "workflow", "run", workflow,
@@ -364,9 +374,135 @@ class KernelBuildBot:
                 await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
                 return
         self.db.record_build(user_id, serial, workflow, json.dumps(inputs, sort_keys=True))
-        actions_url = f"https://github.com/{self.settings.github_repo}/actions/workflows/{workflow}"
+        self.db.create_build_job(request_id, user_id, user_id, workflow)
         context.user_data.clear()
-        await query.edit_message_text(f"授权通过，构建已提交：\n{actions_url}")
+        await query.edit_message_text("构建已提交，请等待完成。完成后机器人会直接发送刷机包。")
+
+    def github_headers(self) -> dict[str, str]:
+        return {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.settings.github_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    async def post_init(self, application: Application) -> None:
+        self._monitor_task = asyncio.create_task(self.monitor_builds(application))
+
+    async def post_shutdown(self, application: Application) -> None:
+        if self._monitor_task:
+            self._monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._monitor_task
+
+    async def monitor_builds(self, application: Application) -> None:
+        while True:
+            for job in self.db.pending_build_jobs():
+                try:
+                    await self.process_build_job(application, job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.exception("build monitor failed for request %s", job["request_id"])
+            await asyncio.sleep(15)
+
+    async def process_build_job(self, application: Application, job) -> None:
+        request_id = job["request_id"]
+        run_id = job["github_run_id"]
+        api_root = f"https://api.github.com/repos/{self.settings.github_repo}"
+        timeout = httpx.Timeout(120, connect=30)
+        async with httpx.AsyncClient(
+            headers=self.github_headers(), timeout=timeout, follow_redirects=True
+        ) as client:
+            if run_id is None:
+                response = await client.get(
+                    f"{api_root}/actions/workflows/{job['workflow_file']}/runs",
+                    params={"event": "workflow_dispatch", "per_page": 50},
+                )
+                response.raise_for_status()
+                run = next(
+                    (
+                        item
+                        for item in response.json().get("workflow_runs", [])
+                        if request_id in (item.get("display_title") or "")
+                    ),
+                    None,
+                )
+                if run is None:
+                    if int(time.time()) - int(job["created_at"]) > 900:
+                        await application.bot.send_message(
+                            job["chat_id"], "未能关联本次构建，请联系管理员。"
+                        )
+                        self.db.update_build_job(request_id, "failed")
+                    return
+                run_id = int(run["id"])
+                self.db.update_build_job(request_id, "running", run_id)
+            else:
+                response = await client.get(f"{api_root}/actions/runs/{run_id}")
+                response.raise_for_status()
+                run = response.json()
+
+            if run.get("status") != "completed":
+                self.db.update_build_job(request_id, "running", run_id)
+                return
+            if run.get("conclusion") != "success":
+                await application.bot.send_message(job["chat_id"], "本次构建失败，请联系管理员。")
+                self.db.update_build_job(request_id, "failed", run_id)
+                return
+
+            self.db.update_build_job(request_id, "delivery_pending", run_id)
+            response = await client.get(f"{api_root}/actions/runs/{run_id}/artifacts")
+            response.raise_for_status()
+            artifacts = response.json().get("artifacts", [])
+            artifact = next(
+                (
+                    item
+                    for item in artifacts
+                    if re.match(r"^(AnyKernel3|ak3)_.*\.zip$", item.get("name", ""), re.I)
+                    and not item.get("expired")
+                ),
+                None,
+            )
+            if artifact is None:
+                logging.warning("AK3 artifact is not available yet for run %s", run_id)
+                return
+
+            with tempfile.TemporaryDirectory(prefix="oneplus-gki-") as temp_dir:
+                temp = Path(temp_dir)
+                archive_path = temp / "artifact-download.zip"
+                async with client.stream("GET", artifact["archive_download_url"]) as download:
+                    download.raise_for_status()
+                    with archive_path.open("wb") as output:
+                        async for chunk in download.aiter_bytes():
+                            output.write(chunk)
+
+                send_path = archive_path
+                send_name = artifact["name"]
+                with zipfile.ZipFile(archive_path) as archive:
+                    nested = [
+                        info
+                        for info in archive.infolist()
+                        if not info.is_dir()
+                        and Path(info.filename).name == info.filename
+                        and re.match(r"^(AnyKernel3|ak3)_.*\.zip$", info.filename, re.I)
+                    ]
+                    if len(nested) == 1:
+                        send_name = nested[0].filename
+                        send_path = temp / send_name
+                        with archive.open(nested[0]) as source, send_path.open("wb") as output:
+                            shutil.copyfileobj(source, output)
+
+                with send_path.open("rb") as document:
+                    await application.bot.send_document(
+                        chat_id=job["chat_id"],
+                        document=document,
+                        filename=send_name,
+                        caption="构建完成，刷机前请确认机型和序列号。",
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=30,
+                        pool_timeout=30,
+                    )
+            self.db.update_build_job(request_id, "sent", run_id)
 
     async def allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.is_admin(update.effective_user.id):
@@ -455,7 +591,13 @@ class KernelBuildBot:
         await update.effective_message.reply_text(summary)
 
     def application(self) -> Application:
-        app = Application.builder().token(self.settings.telegram_token).build()
+        app = (
+            Application.builder()
+            .token(self.settings.telegram_token)
+            .post_init(self.post_init)
+            .post_shutdown(self.post_shutdown)
+            .build()
+        )
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("join", self.join))
         app.add_handler(CommandHandler("build", self.build))

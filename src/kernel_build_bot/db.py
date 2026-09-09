@@ -51,6 +51,16 @@ class Database:
                     workflow_key TEXT NOT NULL,
                     bound_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS build_jobs (
+                    request_id TEXT PRIMARY KEY,
+                    telegram_user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    workflow_file TEXT NOT NULL,
+                    github_run_id INTEGER,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(serials)")}
@@ -187,3 +197,43 @@ class Database:
                 "INSERT INTO builds(telegram_user_id, serial_hash, workflow, inputs, created_at) VALUES (?, ?, ?, ?, ?)",
                 (user_id, self.serial_hash(serial), workflow, inputs, int(time.time())),
             )
+
+    def create_build_job(self, request_id: str, user_id: int, chat_id: int, workflow_file: str) -> None:
+        now = int(time.time())
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO build_jobs(
+                     request_id, telegram_user_id, chat_id, workflow_file,
+                     github_run_id, status, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, NULL, 'submitted', ?, ?)""",
+                (request_id, user_id, chat_id, workflow_file, now, now),
+            )
+
+    def pending_build_jobs(self) -> list[sqlite3.Row]:
+        with self._connect() as db:
+            return db.execute(
+                """SELECT request_id, telegram_user_id, chat_id, workflow_file,
+                          github_run_id, status, created_at, updated_at
+                   FROM build_jobs
+                   WHERE status IN ('submitted', 'running', 'delivery_pending')
+                   ORDER BY created_at"""
+            ).fetchall()
+
+    def update_build_job(
+        self,
+        request_id: str,
+        status: str,
+        github_run_id: int | None = None,
+    ) -> None:
+        with self._connect() as db:
+            if github_run_id is None:
+                db.execute(
+                    "UPDATE build_jobs SET status=?, updated_at=? WHERE request_id=?",
+                    (status, int(time.time()), request_id),
+                )
+            else:
+                db.execute(
+                    """UPDATE build_jobs SET status=?, github_run_id=?, updated_at=?
+                       WHERE request_id=?""",
+                    (status, github_run_id, int(time.time()), request_id),
+                )

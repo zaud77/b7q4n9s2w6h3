@@ -46,6 +46,20 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
     assert db.count_builds(43, 0, 4_102_444_800) == 0
 
 
+def test_pending_build_job_survives_database_reopen(tmp_path):
+    path = str(tmp_path / "bot.db")
+    db = Database(path, "test-pepper")
+    db.create_build_job("request-1", 42, 42, "build.yml")
+    job = Database(path, "test-pepper").pending_build_jobs()[0]
+    assert job["request_id"] == "request-1"
+    assert job["github_run_id"] is None
+    db.update_build_job("request-1", "running", 1234)
+    job = db.pending_build_jobs()[0]
+    assert job["github_run_id"] == 1234
+    db.update_build_job("request-1", "sent", 1234)
+    assert db.pending_build_jobs() == []
+
+
 def test_parse_whitelist():
     rows, errors = parse_whitelist(
         "# comment\n3B15A800Y5D00000\n3B164V00HYR00000,42\n"
