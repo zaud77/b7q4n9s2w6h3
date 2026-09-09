@@ -120,6 +120,14 @@ class Database:
             ).fetchone()
         return bool(row and row["enabled"] and (row["owner_user_id"] is None or row["owner_user_id"] == user_id))
 
+    def serial_is_allowed(self, serial: str) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT enabled FROM serials WHERE serial_hash=?",
+                (self.serial_hash(serial),),
+            ).fetchone()
+        return bool(row and row["enabled"])
+
     def serial_for_user(self, user_id: int) -> str | None:
         with self._connect() as db:
             row = db.execute(

@@ -10,9 +10,12 @@ def test_serial_owner_and_revoke(tmp_path):
     assert db.serial_for_user(43) is None
     assert db.verify_serial("3B15A800Y5D00000", 42)
     assert not db.verify_serial("3B15A800Y5D00000", 43)
+    assert db.serial_is_allowed("3B15A800Y5D00000")
     assert not db.verify_serial("3B15A800Y5D00001", 42)
+    assert not db.serial_is_allowed("3B15A800Y5D00001")
     assert db.revoke_serial("3B15A800Y5D00000")
     assert not db.verify_serial("3B15A800Y5D00000", 42)
+    assert not db.serial_is_allowed("3B15A800Y5D00000")
     assert db.serial_for_user(42) is None
 
 

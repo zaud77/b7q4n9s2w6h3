@@ -209,6 +209,43 @@ class KernelBuildBot:
         prompt = "请选择本次构建脚本：" if self.is_admin(user.id) else "首次构建，请选择要绑定的构建脚本："
         await update.effective_message.reply_text(prompt, reply_markup=InlineKeyboardMarkup(keyboard))
 
+    async def build_for(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
+        user = update.effective_user
+        if not self.is_admin(user.id):
+            await update.effective_message.reply_text("无权使用管理员命令。")
+            return
+        if not context.args or not SERIAL_RE.fullmatch(context.args[0]):
+            await update.effective_message.reply_text("用法：/buildfor 序列号")
+            return
+        serial = context.args[0]
+        if not self.db.serial_is_allowed(serial):
+            await update.effective_message.reply_text("该序列号不在启用的白名单中。")
+            return
+        if not await self.is_channel_member(context, user.id):
+            await update.effective_message.reply_text("所有者账号当前不在构建频道中。")
+            return
+        if update.effective_chat.id != user.id:
+            await update.effective_message.reply_text("请在与机器人的私聊中使用 /buildfor。")
+            return
+        context.user_data.clear()
+        context.user_data.update(
+            serial=serial,
+            options=defaults(),
+            owner_directed_build=True,
+            delivery_chat_id=user.id,
+        )
+        keyboard = [
+            [InlineKeyboardButton(label, callback_data=f"kernel:{key}")]
+            for key, (label, _) in WORKFLOWS.items()
+        ]
+        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+        await update.effective_message.reply_text(
+            f"为序列号 {serial} 构建；完成后的产物只发送给你。\n请选择构建脚本：",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
             return
@@ -348,7 +385,19 @@ class KernelBuildBot:
             return
         serial = context.user_data.get("serial", "")
         workflow_key = context.user_data.get("workflow", "")
-        if not await self.is_channel_member(context, user_id) or not self.db.verify_serial(serial, user_id):
+        owner_directed = bool(context.user_data.get("owner_directed_build"))
+        serial_authorized = (
+            self.is_admin(user_id) and owner_directed and self.db.serial_is_allowed(serial)
+        ) or self.db.verify_serial(serial, user_id)
+        delivery_chat_id = int(context.user_data.get("delivery_chat_id", user_id))
+        owner_delivery_valid = not owner_directed or (
+            self.is_admin(user_id) and delivery_chat_id == user_id
+        )
+        if (
+            not await self.is_channel_member(context, user_id)
+            or not serial_authorized
+            or not owner_delivery_valid
+        ):
             context.user_data.clear()
             await query.edit_message_text("最终授权检查失败，未触发构建。")
             return
@@ -428,7 +477,9 @@ class KernelBuildBot:
                 return
         serialized_inputs = json.dumps(inputs, sort_keys=True)
         self.db.record_build(user_id, serial, workflow, serialized_inputs)
-        self.db.create_build_job(request_id, user_id, user_id, workflow, serialized_inputs)
+        self.db.create_build_job(
+            request_id, user_id, delivery_chat_id, workflow, serialized_inputs
+        )
         context.user_data.clear()
         await query.edit_message_text("构建已提交，请等待完成。完成后机器人会直接发送刷机包。")
 
@@ -735,6 +786,7 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("join", self.join))
         app.add_handler(CommandHandler("build", self.build))
+        app.add_handler(CommandHandler("buildfor", self.build_for))
         app.add_handler(CommandHandler("allow", self.allow))
         app.add_handler(CommandHandler("revoke", self.revoke))
         app.add_handler(CommandHandler("allowed", self.allowed))
