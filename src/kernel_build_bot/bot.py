@@ -28,7 +28,7 @@ SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{6,64}$")
 WORKFLOWS = {
     "623": ("6.12.23 · OnePlus 15", "build.yml"),
     "638a": ("6.12.38 · Ace6T", "fastbuild_6.12.38.yml"),
-    "638t": ("6.12.38 · OnePlus 15T", "fastbuild_6.12.38_oneplus_15t.yml"),
+    "638t": ("6.12.38 · OnePlus 15T（启动兼容测试）", "fastbuild_6.12.38_oneplus_15t.yml"),
     "658": ("6.12.58", "fastbuild_6.12.58.yml"),
 }
 
@@ -212,6 +212,12 @@ class KernelBuildBot:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
                 return
             context.user_data["workflow"] = key
+            if key == "638t":
+                # Keep the first device-side test as close as possible to the
+                # upstream OP15T booting baseline. Users can opt features in.
+                options = context.user_data["options"]
+                options["lz4_enable"] = "false"
+                options["unicode_enable"] = "false"
             await query.edit_message_text(
                 f"已选择：{WORKFLOWS[key][0]}\n继续选择功能：",
                 reply_markup=self.options_markup(context.user_data["options"]),
