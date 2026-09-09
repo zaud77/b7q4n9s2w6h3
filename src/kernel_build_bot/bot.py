@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -41,6 +43,32 @@ BBR_VALUES = ["false", "true", "default"]
 DROID_VALUES = ["false", "standard", "extend"]
 
 
+def parse_whitelist(text: str) -> tuple[list[tuple[str, int | None]], list[str]]:
+    rows: list[tuple[str, int | None]] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in re.split(r"[,\t]", line, maxsplit=1)]
+        serial = parts[0]
+        if not SERIAL_RE.fullmatch(serial):
+            errors.append(f"第 {number} 行序列号格式无效")
+            continue
+        owner: int | None = None
+        if len(parts) == 2 and parts[1]:
+            if not parts[1].isdigit():
+                errors.append(f"第 {number} 行 Telegram 用户 ID 无效")
+                continue
+            owner = int(parts[1])
+        if serial in seen:
+            continue
+        seen.add(serial)
+        rows.append((serial, owner))
+    return rows, errors
+
+
 def defaults() -> dict[str, str]:
     values = {key: "false" for key in BOOL_LABELS}
     values.update(
@@ -76,33 +104,73 @@ class KernelBuildBot:
         }
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        if await self.is_channel_member(context, user_id):
+            await update.effective_message.reply_text(
+                "频道成员验证通过。使用 /build 发起内核构建。构建前仍会复核序列号白名单。"
+            )
+            return
+        context.user_data.clear()
+        context.user_data["awaiting_join_serial"] = True
         await update.effective_message.reply_text(
-            "使用 /build 发起内核构建。构建前会同时检查频道成员身份和序列号白名单。"
+            "请先输入设备序列号。白名单验证通过后，机器人会签发限时、一次性频道邀请链接。"
         )
+
+    async def join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data.clear()
+        context.user_data["awaiting_join_serial"] = True
+        await update.effective_message.reply_text("请输入白名单设备序列号：")
 
     async def build(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not await self.is_channel_member(context, user.id):
-            suffix = f"\n加入频道：{self.settings.required_channel_url}" if self.settings.required_channel_url else ""
-            await update.effective_message.reply_text("未通过频道成员验证。" + suffix)
+            await update.effective_message.reply_text("尚未通过入频道验证，请先使用 /join。")
             return
         context.user_data.clear()
-        context.user_data["awaiting_serial"] = True
+        context.user_data["awaiting_build_serial"] = True
         await update.effective_message.reply_text("请输入需要绑定的设备序列号：")
 
-    async def serial_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not context.user_data.get("awaiting_serial"):
+    async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        joining = context.user_data.get("awaiting_join_serial")
+        building = context.user_data.get("awaiting_build_serial")
+        if not joining and not building:
             return
         serial = update.effective_message.text.strip()
         if not SERIAL_RE.fullmatch(serial):
             await update.effective_message.reply_text("序列号格式无效，请重新输入。")
             return
         user_id = update.effective_user.id
-        if not await self.is_channel_member(context, user_id) or not self.db.verify_serial(serial, user_id):
+        if not self.db.verify_serial(serial, user_id):
             context.user_data.clear()
-            await update.effective_message.reply_text("频道或序列号数据库验证失败。")
+            await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
             return
-        context.user_data.update(awaiting_serial=False, serial=serial, options=defaults())
+        if joining:
+            if await self.is_channel_member(context, user_id):
+                context.user_data.clear()
+                await update.effective_message.reply_text("序列号和频道成员身份均已验证，可使用 /build。")
+                return
+            try:
+                invite = await context.bot.create_chat_invite_link(
+                    chat_id=self.settings.required_channel_id,
+                    name=f"serial-{serial[-4:]}-user-{user_id}",
+                    expire_date=datetime.now(timezone.utc) + timedelta(minutes=10),
+                    member_limit=1,
+                )
+            except Exception:
+                logging.exception("failed to create one-time invite")
+                await update.effective_message.reply_text("序列号已通过，但邀请链接签发失败，请联系管理员。")
+                return
+            context.user_data.clear()
+            await update.effective_message.reply_text(
+                "序列号验证通过。以下链接 10 分钟内有效且只能使用 1 次：\n"
+                f"{invite.invite_link}\n\n加入后使用 /build。"
+            )
+            return
+        if not await self.is_channel_member(context, user_id):
+            context.user_data.clear()
+            await update.effective_message.reply_text("频道成员复核失败，请重新使用 /join。")
+            return
+        context.user_data.update(awaiting_build_serial=False, serial=serial, options=defaults())
         keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
         keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await update.effective_message.reply_text("请选择内核版本/机型：", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -189,18 +257,46 @@ class KernelBuildBot:
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
         inputs["device_serial"] = serial
-        endpoint = f"https://api.github.com/repos/{self.settings.github_repo}/actions/workflows/{workflow}/dispatches"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self.settings.github_token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(endpoint, headers=headers, json={"ref": self.settings.github_ref, "inputs": inputs})
-        if response.status_code != 204:
-            logging.error("GitHub dispatch failed: %s %s", response.status_code, response.text)
-            await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
-            return
+        if self.settings.github_use_gh_cli:
+            args = [
+                "gh", "workflow", "run", workflow,
+                "--repo", self.settings.github_repo,
+                "--ref", self.settings.github_ref,
+            ]
+            for key, value in inputs.items():
+                args.extend(["-f", f"{key}={value}"])
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode != 0:
+                logging.error(
+                    "gh workflow run failed (%s): %s %s",
+                    process.returncode,
+                    stdout.decode(errors="replace"),
+                    stderr.decode(errors="replace"),
+                )
+                await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
+                return
+        else:
+            endpoint = f"https://api.github.com/repos/{self.settings.github_repo}/actions/workflows/{workflow}/dispatches"
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.settings.github_token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    endpoint,
+                    headers=headers,
+                    json={"ref": self.settings.github_ref, "inputs": inputs},
+                )
+            if response.status_code != 204:
+                logging.error("GitHub dispatch failed: %s %s", response.status_code, response.text)
+                await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
+                return
         self.db.record_build(user_id, serial, workflow, json.dumps(inputs, sort_keys=True))
         actions_url = f"https://github.com/{self.settings.github_repo}/actions/workflows/{workflow}"
         context.user_data.clear()
@@ -235,15 +331,48 @@ class KernelBuildBot:
         ) or "数据库为空。"
         await update.effective_message.reply_text(text)
 
+    async def whitelist_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.is_admin(update.effective_user.id):
+            return
+        document = update.effective_message.document
+        name = (document.file_name or "").lower()
+        if not name.endswith((".txt", ".csv")):
+            await update.effective_message.reply_text("仅支持 UTF-8 编码的 .txt 或 .csv 白名单文件。")
+            return
+        if document.file_size and document.file_size > 1024 * 1024:
+            await update.effective_message.reply_text("白名单文件不能超过 1 MiB。")
+            return
+        telegram_file = await document.get_file()
+        payload = await telegram_file.download_as_bytearray()
+        try:
+            text = bytes(payload).decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await update.effective_message.reply_text("文件不是有效的 UTF-8 文本。")
+            return
+        rows, errors = parse_whitelist(text)
+        if len(rows) > 5000:
+            await update.effective_message.reply_text("单次最多导入 5000 条序列号。")
+            return
+        for serial, owner in rows:
+            self.db.allow_serial(serial, owner, update.effective_user.id)
+        summary = f"已导入 {len(rows)} 条白名单序列号。"
+        if errors:
+            summary += f"\n跳过 {len(errors)} 行：\n" + "\n".join(errors[:20])
+            if len(errors) > 20:
+                summary += f"\n……另有 {len(errors) - 20} 行"
+        await update.effective_message.reply_text(summary)
+
     def application(self) -> Application:
         app = Application.builder().token(self.settings.telegram_token).build()
         app.add_handler(CommandHandler("start", self.start))
+        app.add_handler(CommandHandler("join", self.join))
         app.add_handler(CommandHandler("build", self.build))
         app.add_handler(CommandHandler("allow", self.allow))
         app.add_handler(CommandHandler("revoke", self.revoke))
         app.add_handler(CommandHandler("allowed", self.allowed))
         app.add_handler(CallbackQueryHandler(self.callback))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.serial_message))
+        app.add_handler(MessageHandler(filters.Document.ALL, self.whitelist_document))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message))
         return app
 
 
@@ -254,4 +383,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

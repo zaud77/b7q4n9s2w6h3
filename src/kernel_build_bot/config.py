@@ -17,6 +17,7 @@ class Settings:
     required_channel_id: int | str
     required_channel_url: str
     github_token: str
+    github_use_gh_cli: bool
     github_repo: str
     github_ref: str
     serial_pepper: str
@@ -33,11 +34,18 @@ class Settings:
         )
         channel_id_raw = _required("REQUIRED_CHANNEL_ID")
         channel_id: int | str = int(channel_id_raw) if channel_id_raw.lstrip("-").isdigit() else channel_id_raw
+        github_use_gh_cli = os.environ.get("GITHUB_USE_GH_CLI", "false").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if not github_use_gh_cli and not github_token:
+            raise RuntimeError("missing required environment variable: GITHUB_TOKEN")
         return cls(
             telegram_token=_required("TELEGRAM_BOT_TOKEN"),
             required_channel_id=channel_id,
             required_channel_url=os.environ.get("REQUIRED_CHANNEL_URL", "").strip(),
-            github_token=_required("GITHUB_TOKEN"),
+            github_token=github_token,
+            github_use_gh_cli=github_use_gh_cli,
             github_repo=os.environ.get("GITHUB_REPO", "cvhhji/oneplus_sm8850_hmbird").strip(),
             github_ref=os.environ.get("GITHUB_REF", "main").strip(),
             serial_pepper=_required("SERIAL_PEPPER"),
