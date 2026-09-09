@@ -684,7 +684,8 @@ class KernelBuildBot:
                             chat_id=job["chat_id"],
                             document=document,
                             filename=send_name,
-                            caption=caption,
+                            # Regular recipients receive files without build details.
+                            caption=caption if self.is_admin(job["chat_id"]) else None,
                             read_timeout=120,
                             write_timeout=120,
                             connect_timeout=30,
