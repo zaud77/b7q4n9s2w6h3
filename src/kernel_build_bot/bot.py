@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -50,6 +50,7 @@ BOOL_LABELS = {
 KSU_VALUES = ["resukisu", "sukisu", "ksunext", "ksu", "none"]
 BBR_VALUES = ["false", "true", "default"]
 DROID_VALUES = ["false", "standard", "extend"]
+BUILD_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
 def parse_whitelist(text: str) -> tuple[list[tuple[str, int | None]], list[str]]:
@@ -93,6 +94,12 @@ class KernelBuildBot:
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.settings.admin_user_ids
 
+    def daily_build_count(self, user_id: int) -> int:
+        now = datetime.now(BUILD_TIMEZONE)
+        start = datetime.combine(now.date(), datetime_time.min, tzinfo=BUILD_TIMEZONE)
+        end = start + timedelta(days=1)
+        return self.db.count_builds(user_id, int(start.timestamp()), int(end.timestamp()))
+
     async def is_channel_member(self, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
         try:
             member = await context.bot.get_chat_member(self.settings.required_channel_id, user_id)
@@ -129,21 +136,43 @@ class KernelBuildBot:
         if not await self.is_channel_member(context, user.id):
             await update.effective_message.reply_text("尚未通过入频道验证，请先使用 /join。")
             return
+        serial = self.db.serial_for_user(user.id)
+        if not serial:
+            await update.effective_message.reply_text("当前 Telegram 账号尚未绑定有效序列号，请先使用 /join。")
+            return
+        if self.daily_build_count(user.id) >= self.settings.daily_build_limit:
+            await update.effective_message.reply_text(
+                f"今天已达到 {self.settings.daily_build_limit} 次构建上限，请在北京时间次日再试。"
+            )
+            return
         context.user_data.clear()
-        context.user_data["awaiting_build_serial"] = True
-        await update.effective_message.reply_text("请输入需要绑定的设备序列号：")
+        context.user_data.update(serial=serial, options=defaults())
+        bound_workflow = self.db.workflow_for_user(user.id)
+        if bound_workflow:
+            if bound_workflow not in WORKFLOWS:
+                await update.effective_message.reply_text("已绑定的构建脚本当前不可用，请联系管理员。")
+                return
+            context.user_data["workflow"] = bound_workflow
+            await update.effective_message.reply_text(
+                f"已绑定：{WORKFLOWS[bound_workflow][0]}\n请选择功能：",
+                reply_markup=self.options_markup(defaults(), self.is_admin(user.id)),
+            )
+            return
+        keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
+        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+        await update.effective_message.reply_text(
+            "首次构建，请选择要绑定的构建脚本：", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        joining = context.user_data.get("awaiting_join_serial")
-        building = context.user_data.get("awaiting_build_serial")
-        if not joining and not building:
+        if context.user_data is None or not context.user_data.get("awaiting_join_serial"):
             return
         serial = update.effective_message.text.strip()
         if not SERIAL_RE.fullmatch(serial):
             await update.effective_message.reply_text("序列号格式无效，请重新输入。")
             return
         user_id = update.effective_user.id
-        if joining:
+        if context.user_data.get("awaiting_join_serial"):
             if await self.is_channel_member(context, user_id):
                 if not self.db.claim_serial(serial, user_id):
                     await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
@@ -173,17 +202,6 @@ class KernelBuildBot:
             context.user_data.clear()
             await update.effective_message.reply_text("序列号验证通过，已批准进入频道。加入后可使用 /build。")
             return
-        if not self.db.verify_serial(serial, user_id):
-            await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
-            return
-        if not await self.is_channel_member(context, user_id):
-            context.user_data.clear()
-            await update.effective_message.reply_text("频道成员复核失败，请重新使用 /join。")
-            return
-        context.user_data.update(awaiting_build_serial=False, serial=serial, options=defaults())
-        keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
-        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-        await update.effective_message.reply_text("请选择内核版本/机型：", reply_markup=InlineKeyboardMarkup(keyboard))
 
     def options_markup(self, options: dict[str, str], show_self_config: bool) -> InlineKeyboardMarkup:
         rows = []
@@ -214,6 +232,11 @@ class KernelBuildBot:
             key = data.split(":", 1)[1]
             if key not in WORKFLOWS or "serial" not in context.user_data:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
+                return
+            bound_workflow = self.db.bind_workflow(query.from_user.id, key)
+            if bound_workflow != key:
+                await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
                 return
             context.user_data["workflow"] = key
             if key == "638t":
@@ -277,8 +300,17 @@ class KernelBuildBot:
         if wait:
             await query.answer(f"请在 {wait} 秒后再构建", show_alert=True)
             return
+        if self.daily_build_count(user_id) >= self.settings.daily_build_limit:
+            await query.answer(
+                f"今天已达到 {self.settings.daily_build_limit} 次构建上限",
+                show_alert=True,
+            )
+            return
         if workflow_key not in WORKFLOWS:
             await query.edit_message_text("未选择有效工作流。")
+            return
+        if self.db.workflow_for_user(user_id) != workflow_key:
+            await query.edit_message_text("构建脚本绑定复核失败，请重新使用 /build。")
             return
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])

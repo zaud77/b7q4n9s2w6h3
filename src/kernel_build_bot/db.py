@@ -46,6 +46,11 @@ class Database:
                     user_chat_id INTEGER NOT NULL,
                     requested_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS workflow_bindings (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    workflow_key TEXT NOT NULL,
+                    bound_at INTEGER NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(serials)")}
@@ -84,6 +89,38 @@ class Database:
                 (self.serial_hash(serial),),
             ).fetchone()
         return bool(row and row["enabled"] and (row["owner_user_id"] is None or row["owner_user_id"] == user_id))
+
+    def serial_for_user(self, user_id: int) -> str | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT serial_value FROM serials
+                   WHERE owner_user_id=? AND enabled=1 AND serial_value IS NOT NULL
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+            return row["serial_value"] if row else None
+
+    def workflow_for_user(self, user_id: int) -> str | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            return row["workflow_key"] if row else None
+
+    def bind_workflow(self, user_id: int, workflow_key: str) -> str:
+        """Bind once and return the authoritative workflow key."""
+        with self._connect() as db:
+            db.execute(
+                """INSERT OR IGNORE INTO workflow_bindings(telegram_user_id, workflow_key, bound_at)
+                   VALUES (?, ?, ?)""",
+                (user_id, workflow_key, int(time.time())),
+            )
+            row = db.execute(
+                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            return row["workflow_key"]
 
     def claim_serial(self, serial: str, user_id: int) -> bool:
         """Bind an enabled unclaimed serial to the first verified Telegram user."""
@@ -134,6 +171,15 @@ class Database:
         if not row or row["latest"] is None:
             return 0
         return max(0, cooldown - (int(time.time()) - int(row["latest"])))
+
+    def count_builds(self, user_id: int, since: int, before: int) -> int:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT COUNT(*) AS total FROM builds
+                   WHERE telegram_user_id=? AND created_at>=? AND created_at<?""",
+                (user_id, since, before),
+            ).fetchone()
+            return int(row["total"])
 
     def record_build(self, user_id: int, serial: str, workflow: str, inputs: str) -> None:
         with self._connect() as db:

@@ -24,6 +24,7 @@ class Settings:
     database_path: str
     admin_user_ids: frozenset[int]
     cooldown_seconds: int
+    daily_build_limit: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,4 +53,5 @@ class Settings:
             database_path=os.environ.get("DATABASE_PATH", "data/bot.db").strip(),
             admin_user_ids=admins,
             cooldown_seconds=int(os.environ.get("BUILD_COOLDOWN_SECONDS", "600")),
+            daily_build_limit=int(os.environ.get("DAILY_BUILD_LIMIT", "2")),
         )

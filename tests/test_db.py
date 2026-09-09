@@ -6,11 +6,14 @@ def test_serial_owner_and_revoke(tmp_path):
     db = Database(str(tmp_path / "bot.db"), "test-pepper")
     db.allow_serial("3B15A800Y5D00000", 42, 1)
     assert db.list_serials()[0]["serial_value"] == "3B15A800Y5D00000"
+    assert db.serial_for_user(42) == "3B15A800Y5D00000"
+    assert db.serial_for_user(43) is None
     assert db.verify_serial("3B15A800Y5D00000", 42)
     assert not db.verify_serial("3B15A800Y5D00000", 43)
     assert not db.verify_serial("3B15A800Y5D00001", 42)
     assert db.revoke_serial("3B15A800Y5D00000")
     assert not db.verify_serial("3B15A800Y5D00000", 42)
+    assert db.serial_for_user(42) is None
 
 
 def test_pending_join_survives_database_reopen(tmp_path):
@@ -30,6 +33,17 @@ def test_first_join_claims_unbound_serial(tmp_path):
     assert db.verify_serial("3B15AJ00S9700000", 42)
     assert not db.verify_serial("3B15AJ00S9700000", 43)
     assert not db.claim_serial("3B15AJ00S9700000", 43)
+
+
+def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
+    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    assert db.workflow_for_user(42) is None
+    assert db.bind_workflow(42, "623") == "623"
+    assert db.bind_workflow(42, "658") == "623"
+    assert db.workflow_for_user(42) == "623"
+    db.record_build(42, "3B15A800Y5D00000", "build.yml", "{}")
+    assert db.count_builds(42, 0, 4_102_444_800) == 1
+    assert db.count_builds(43, 0, 4_102_444_800) == 0
 
 
 def test_parse_whitelist():
