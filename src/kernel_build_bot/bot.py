@@ -146,8 +146,12 @@ class KernelBuildBot:
             )
             return
         context.user_data.clear()
-        context.user_data.update(serial=serial, options=defaults())
         bound_workflow = self.db.workflow_for_user(user.id)
+        options = defaults()
+        if bound_workflow == "638t":
+            options["lz4_enable"] = "false"
+            options["unicode_enable"] = "false"
+        context.user_data.update(serial=serial, options=options)
         if bound_workflow:
             if bound_workflow not in WORKFLOWS:
                 await update.effective_message.reply_text("已绑定的构建脚本当前不可用，请联系管理员。")
@@ -155,7 +159,7 @@ class KernelBuildBot:
             context.user_data["workflow"] = bound_workflow
             await update.effective_message.reply_text(
                 f"已绑定：{WORKFLOWS[bound_workflow][0]}\n请选择功能：",
-                reply_markup=self.options_markup(defaults(), self.is_admin(user.id)),
+                reply_markup=self.options_markup(options, self.is_admin(user.id)),
             )
             return
         keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
