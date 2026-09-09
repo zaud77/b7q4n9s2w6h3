@@ -56,6 +56,7 @@ class Database:
                     telegram_user_id INTEGER NOT NULL,
                     chat_id INTEGER NOT NULL,
                     workflow_file TEXT NOT NULL,
+                    inputs TEXT NOT NULL DEFAULT '{}',
                     github_run_id INTEGER,
                     status TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
@@ -66,6 +67,21 @@ class Database:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(serials)")}
             if "serial_value" not in columns:
                 db.execute("ALTER TABLE serials ADD COLUMN serial_value TEXT")
+            job_columns = {row["name"] for row in db.execute("PRAGMA table_info(build_jobs)")}
+            if "inputs" not in job_columns:
+                db.execute("ALTER TABLE build_jobs ADD COLUMN inputs TEXT NOT NULL DEFAULT '{}'")
+            # Preserve feature selections for jobs submitted before this migration.
+            db.execute(
+                """UPDATE build_jobs
+                   SET inputs=COALESCE((
+                       SELECT builds.inputs FROM builds
+                       WHERE builds.telegram_user_id=build_jobs.telegram_user_id
+                         AND builds.workflow=build_jobs.workflow_file
+                         AND builds.created_at=build_jobs.created_at
+                       ORDER BY builds.id DESC LIMIT 1
+                   ), inputs)
+                   WHERE inputs='{}'"""
+            )
 
     def serial_hash(self, serial: str) -> str:
         return hmac.new(self.pepper, serial.encode("ascii"), hashlib.sha256).hexdigest()
@@ -198,22 +214,29 @@ class Database:
                 (user_id, self.serial_hash(serial), workflow, inputs, int(time.time())),
             )
 
-    def create_build_job(self, request_id: str, user_id: int, chat_id: int, workflow_file: str) -> None:
+    def create_build_job(
+        self,
+        request_id: str,
+        user_id: int,
+        chat_id: int,
+        workflow_file: str,
+        inputs: str = "{}",
+    ) -> None:
         now = int(time.time())
         with self._connect() as db:
             db.execute(
                 """INSERT INTO build_jobs(
                      request_id, telegram_user_id, chat_id, workflow_file,
-                     github_run_id, status, created_at, updated_at
-                   ) VALUES (?, ?, ?, ?, NULL, 'submitted', ?, ?)""",
-                (request_id, user_id, chat_id, workflow_file, now, now),
+                     inputs, github_run_id, status, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, NULL, 'submitted', ?, ?)""",
+                (request_id, user_id, chat_id, workflow_file, inputs, now, now),
             )
 
     def pending_build_jobs(self) -> list[sqlite3.Row]:
         with self._connect() as db:
             return db.execute(
                 """SELECT request_id, telegram_user_id, chat_id, workflow_file,
-                          github_run_id, status, created_at, updated_at
+                          inputs, github_run_id, status, created_at, updated_at
                    FROM build_jobs
                    WHERE status IN ('submitted', 'running', 'delivery_pending')
                    ORDER BY created_at"""

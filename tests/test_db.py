@@ -49,10 +49,13 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
 def test_pending_build_job_survives_database_reopen(tmp_path):
     path = str(tmp_path / "bot.db")
     db = Database(path, "test-pepper")
-    db.create_build_job("request-1", 42, 42, "build.yml")
+    db.create_build_job(
+        "request-1", 42, 42, "build.yml", '{"nomount_enable": "true"}'
+    )
     job = Database(path, "test-pepper").pending_build_jobs()[0]
     assert job["request_id"] == "request-1"
     assert job["github_run_id"] is None
+    assert job["inputs"] == '{"nomount_enable": "true"}'
     db.update_build_job("request-1", "running", 1234)
     job = db.pending_build_jobs()[0]
     assert job["github_run_id"] == 1234

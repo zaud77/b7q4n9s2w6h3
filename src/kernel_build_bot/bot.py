@@ -373,8 +373,9 @@ class KernelBuildBot:
                 logging.error("GitHub dispatch failed: %s %s", response.status_code, response.text)
                 await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
                 return
-        self.db.record_build(user_id, serial, workflow, json.dumps(inputs, sort_keys=True))
-        self.db.create_build_job(request_id, user_id, user_id, workflow)
+        serialized_inputs = json.dumps(inputs, sort_keys=True)
+        self.db.record_build(user_id, serial, workflow, serialized_inputs)
+        self.db.create_build_job(request_id, user_id, user_id, workflow, serialized_inputs)
         context.user_data.clear()
         await query.edit_message_text("构建已提交，请等待完成。完成后机器人会直接发送刷机包。")
 
@@ -482,55 +483,86 @@ class KernelBuildBot:
             response = await client.get(f"{api_root}/actions/runs/{run_id}/artifacts")
             response.raise_for_status()
             artifacts = response.json().get("artifacts", [])
-            artifact = next(
+            try:
+                build_inputs = json.loads(job["inputs"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                build_inputs = {}
+            nomount_requested = str(build_inputs.get("nomount_enable", "false")).lower() == "true"
+
+            packages = [
                 (
-                    item
-                    for item in artifacts
-                    if re.match(r"^(AnyKernel3|ak3)_.*\.zip$", item.get("name", ""), re.I)
-                    and not item.get("expired")
-                ),
-                None,
-            )
-            if artifact is None:
-                logging.warning("AK3 artifact is not available yet for run %s", run_id)
-                return
+                    "AK3",
+                    re.compile(r"^(AnyKernel3|ak3)_.*\.zip$", re.I),
+                    "构建完成，刷机前请确认机型和序列号。",
+                )
+            ]
+            if nomount_requested:
+                packages.append(
+                    (
+                        "NoMount",
+                        re.compile(r"^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$", re.I),
+                        "NoMount 模块已随本次构建生成，请在对应内核上安装。",
+                    )
+                )
+
+            selected_packages = []
+            for package_type, filename_pattern, caption in packages:
+                artifact = next(
+                    (
+                        item
+                        for item in artifacts
+                        if filename_pattern.match(item.get("name", ""))
+                        and not item.get("expired")
+                    ),
+                    None,
+                )
+                if artifact is None:
+                    logging.warning(
+                        "%s artifact is not available yet for run %s",
+                        package_type,
+                        run_id,
+                    )
+                    return
+                selected_packages.append((artifact, filename_pattern, caption))
 
             with tempfile.TemporaryDirectory(prefix="oneplus-gki-") as temp_dir:
                 temp = Path(temp_dir)
-                archive_path = temp / "artifact-download.zip"
-                async with client.stream("GET", artifact["archive_download_url"]) as download:
-                    download.raise_for_status()
-                    with archive_path.open("wb") as output:
-                        async for chunk in download.aiter_bytes():
-                            output.write(chunk)
+                for index, (artifact, filename_pattern, caption) in enumerate(selected_packages):
+                    archive_path = temp / f"artifact-download-{index}.zip"
+                    async with client.stream("GET", artifact["archive_download_url"]) as download:
+                        download.raise_for_status()
+                        with archive_path.open("wb") as output:
+                            async for chunk in download.aiter_bytes():
+                                output.write(chunk)
 
-                send_path = archive_path
-                send_name = artifact["name"]
-                with zipfile.ZipFile(archive_path) as archive:
-                    nested = [
-                        info
-                        for info in archive.infolist()
-                        if not info.is_dir()
-                        and Path(info.filename).name == info.filename
-                        and re.match(r"^(AnyKernel3|ak3)_.*\.zip$", info.filename, re.I)
-                    ]
-                    if len(nested) == 1:
-                        send_name = nested[0].filename
-                        send_path = temp / send_name
-                        with archive.open(nested[0]) as source, send_path.open("wb") as output:
-                            shutil.copyfileobj(source, output)
+                    send_path = archive_path
+                    send_name = artifact["name"]
+                    if not send_name.lower().endswith(".zip"):
+                        send_name += ".zip"
+                    with zipfile.ZipFile(archive_path) as archive:
+                        nested = [
+                            info
+                            for info in archive.infolist()
+                            if not info.is_dir()
+                            and filename_pattern.match(Path(info.filename).name)
+                        ]
+                        if len(nested) == 1:
+                            send_name = Path(nested[0].filename).name
+                            send_path = temp / f"{index}-{send_name}"
+                            with archive.open(nested[0]) as source, send_path.open("wb") as output:
+                                shutil.copyfileobj(source, output)
 
-                with send_path.open("rb") as document:
-                    await application.bot.send_document(
-                        chat_id=job["chat_id"],
-                        document=document,
-                        filename=send_name,
-                        caption="构建完成，刷机前请确认机型和序列号。",
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=30,
-                        pool_timeout=30,
-                    )
+                    with send_path.open("rb") as document:
+                        await application.bot.send_document(
+                            chat_id=job["chat_id"],
+                            document=document,
+                            filename=send_name,
+                            caption=caption,
+                            read_timeout=120,
+                            write_timeout=120,
+                            connect_timeout=30,
+                            pool_timeout=30,
+                        )
             self.db.update_build_job(request_id, "sent", run_id)
 
     async def allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
