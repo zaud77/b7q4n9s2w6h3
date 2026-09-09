@@ -87,7 +87,7 @@ def defaults() -> dict[str, str]:
         unicode_enable="true",
         bbr_enable="false",
         droidspaces_enable="false",
-        ccache_update="true",
+        ccache_update="false",
         ccache_debug="false",
     )
     return values
