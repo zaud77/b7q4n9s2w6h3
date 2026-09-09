@@ -7,11 +7,11 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 - 使用 `/joinlink` 生成“需要管理员批准”的申请链接；用户点击后不会直接进入频道，机器人会主动私聊并要求输入设备序列号，通过白名单后才批准加入。
 - `/start` 只显示机器人状态；`/join` 可重新进入序列号验证流程。
 - 进入频道后必须仍是指定频道成员，且序列号处于启用状态，才显示并触发构建。
-- 序列号可绑定 Telegram 用户，防止频道成员借用他人序列号。
+- `/allow` 和白名单文件只登记序列号，不要求 Telegram ID；用户首次通过入频道验证时自动绑定其 Telegram 账号，防止之后被他人借用。
 - 菜单支持 6.12.23、6.12.38 Ace6T、6.12.38 OnePlus 15T、6.12.58。
 - 支持 KernelSU 分支、SUSFS、NoMount、KPM、LZ4/Zstd、LZ4KD、zarm、Unicode、BBR/Brutal、Droidspaces、网络增强、ADIOS、Re-Kernel、基带保护和自用配置。
 - SUSFS/NoMount 自动互斥，zarm 强制依赖 LZ4KD；触发前再次检查频道和数据库。
-- 只有 `ADMIN_USER_IDS` 中的所有者可使用管理员命令：`/allow 序列号 [Telegram用户ID]`、`/revoke 序列号`、`/allowed`（兼容 `/allwed`）、`/joinlink`。
+- 只有 `ADMIN_USER_IDS` 中的所有者可使用管理员命令：`/allow 序列号`、`/revoke 序列号`、`/allowed`、`/joinlink`。
 - `/allowed` 会分多条消息显示完整白名单，不再只显示尾号或截断前 100 条。
 - 管理员可直接上传 UTF-8 `.txt`/`.csv` 白名单；每行格式为 `序列号` 或 `序列号,Telegram用户ID`，最多 5000 条。
 

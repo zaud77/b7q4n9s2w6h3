@@ -35,7 +35,7 @@ WORKFLOWS = {
 BOOL_LABELS = {
     "self_config": "自用配置",
     "susfs_enable": "SUSFS",
-    "nomount_enable": "NoMount / PathMask / AppCloak",
+    "nomount_enable": "NoMount",
     "kpm_enable": "KPM / KPatch Next",
     "lz4_enable": "LZ4 + Zstd",
     "lz4kd_enable": "LZ4KD",
@@ -60,21 +60,14 @@ def parse_whitelist(text: str) -> tuple[list[tuple[str, int | None]], list[str]]
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = [part.strip() for part in re.split(r"[,\t]", line, maxsplit=1)]
-        serial = parts[0]
+        serial = re.split(r"[,\t]", line, maxsplit=1)[0].strip()
         if not SERIAL_RE.fullmatch(serial):
             errors.append(f"第 {number} 行序列号格式无效")
             continue
-        owner: int | None = None
-        if len(parts) == 2 and parts[1]:
-            if not parts[1].isdigit():
-                errors.append(f"第 {number} 行 Telegram 用户 ID 无效")
-                continue
-            owner = int(parts[1])
         if serial in seen:
             continue
         seen.add(serial)
-        rows.append((serial, owner))
+        rows.append((serial, None))
     return rows, errors
 
 
@@ -150,19 +143,25 @@ class KernelBuildBot:
             await update.effective_message.reply_text("序列号格式无效，请重新输入。")
             return
         user_id = update.effective_user.id
-        if not self.db.verify_serial(serial, user_id):
-            await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
-            return
         if joining:
             if await self.is_channel_member(context, user_id):
+                if not self.db.claim_serial(serial, user_id):
+                    await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
+                    return
                 context.user_data.clear()
-                await update.effective_message.reply_text("序列号和频道成员身份均已验证，可使用 /build。")
+                await update.effective_message.reply_text("序列号已绑定，频道成员身份验证通过，可使用 /build。")
                 return
             pending = self.db.get_pending_join(user_id)
             if not pending:
+                if not self.db.verify_serial(serial, user_id):
+                    await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
+                    return
                 await update.effective_message.reply_text(
                     "序列号验证通过。请先打开管理员发送的频道申请链接并提交加入请求，机器人收到后会自动验证。"
                 )
+                return
+            if not self.db.claim_serial(serial, user_id):
+                await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
                 return
             try:
                 await context.bot.approve_chat_join_request(self.settings.required_channel_id, user_id)
@@ -173,6 +172,9 @@ class KernelBuildBot:
             self.db.clear_pending_join(user_id)
             context.user_data.clear()
             await update.effective_message.reply_text("序列号验证通过，已批准进入频道。加入后可使用 /build。")
+            return
+        if not self.db.verify_serial(serial, user_id):
+            await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
             return
         if not await self.is_channel_member(context, user_id):
             context.user_data.clear()
@@ -321,10 +323,9 @@ class KernelBuildBot:
             await update.effective_message.reply_text("无权使用管理员命令。")
             return
         if not context.args or not SERIAL_RE.fullmatch(context.args[0]):
-            await update.effective_message.reply_text("用法：/allow 序列号 [绑定的Telegram用户ID]")
+            await update.effective_message.reply_text("用法：/allow 序列号")
             return
-        owner = int(context.args[1]) if len(context.args) > 1 else None
-        self.db.allow_serial(context.args[0], owner, update.effective_user.id)
+        self.db.allow_serial(context.args[0], None, update.effective_user.id)
         await update.effective_message.reply_text(f"已允许尾号 {context.args[0][-4:]}。")
 
     async def revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -410,7 +411,7 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("build", self.build))
         app.add_handler(CommandHandler("allow", self.allow))
         app.add_handler(CommandHandler("revoke", self.revoke))
-        app.add_handler(CommandHandler(["allowed", "allwed"], self.allowed))
+        app.add_handler(CommandHandler("allowed", self.allowed))
         app.add_handler(CommandHandler("joinlink", self.join_link))
         app.add_handler(ChatJoinRequestHandler(self.join_request))
         app.add_handler(CallbackQueryHandler(self.callback))

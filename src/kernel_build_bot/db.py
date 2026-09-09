@@ -64,7 +64,7 @@ class Database:
                    ON CONFLICT(serial_hash) DO UPDATE SET
                      serial_value=excluded.serial_value,
                      serial_tail=excluded.serial_tail,
-                     owner_user_id=excluded.owner_user_id,
+                     owner_user_id=COALESCE(serials.owner_user_id, excluded.owner_user_id),
                      enabled=1""",
                 (digest, serial, serial[-4:], owner_user_id, int(time.time()), created_by),
             )
@@ -84,6 +84,17 @@ class Database:
                 (self.serial_hash(serial),),
             ).fetchone()
         return bool(row and row["enabled"] and (row["owner_user_id"] is None or row["owner_user_id"] == user_id))
+
+    def claim_serial(self, serial: str, user_id: int) -> bool:
+        """Bind an enabled unclaimed serial to the first verified Telegram user."""
+        with self._connect() as db:
+            cursor = db.execute(
+                """UPDATE serials SET owner_user_id=?
+                   WHERE serial_hash=? AND enabled=1
+                     AND (owner_user_id IS NULL OR owner_user_id=?)""",
+                (user_id, self.serial_hash(serial), user_id),
+            )
+            return cursor.rowcount > 0
 
     def list_serials(self) -> list[sqlite3.Row]:
         with self._connect() as db:
