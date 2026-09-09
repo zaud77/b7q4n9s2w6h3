@@ -185,9 +185,11 @@ class KernelBuildBot:
         keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await update.effective_message.reply_text("请选择内核版本/机型：", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    def options_markup(self, options: dict[str, str]) -> InlineKeyboardMarkup:
+    def options_markup(self, options: dict[str, str], show_self_config: bool) -> InlineKeyboardMarkup:
         rows = []
         for key, label in BOOL_LABELS.items():
+            if key == "self_config" and not show_self_config:
+                continue
             mark = "✅" if options[key] == "true" else "⬜"
             rows.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"toggle:{key}")])
         rows.extend(
@@ -222,7 +224,9 @@ class KernelBuildBot:
                 options["unicode_enable"] = "false"
             await query.edit_message_text(
                 f"已选择：{WORKFLOWS[key][0]}\n继续选择功能：",
-                reply_markup=self.options_markup(context.user_data["options"]),
+                reply_markup=self.options_markup(
+                    context.user_data["options"], self.is_admin(query.from_user.id)
+                ),
             )
             return
         options = context.user_data.get("options")
@@ -232,6 +236,10 @@ class KernelBuildBot:
         if data.startswith("toggle:"):
             key = data.split(":", 1)[1]
             if key not in BOOL_LABELS:
+                return
+            if key == "self_config" and not self.is_admin(query.from_user.id):
+                options["self_config"] = "false"
+                await query.answer("该配置仅限所有者使用", show_alert=True)
                 return
             new_value = "false" if options[key] == "true" else "true"
             if key == "zarm_tool" and new_value == "true" and options["lz4kd_enable"] != "true":
@@ -253,7 +261,9 @@ class KernelBuildBot:
         elif data == "dispatch":
             await self.dispatch(query, context)
             return
-        await query.edit_message_reply_markup(reply_markup=self.options_markup(options))
+        await query.edit_message_reply_markup(
+            reply_markup=self.options_markup(options, self.is_admin(query.from_user.id))
+        )
 
     async def dispatch(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = query.from_user.id
@@ -272,6 +282,10 @@ class KernelBuildBot:
             return
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
+        if not self.is_admin(user_id):
+            # Enforce owner-only configuration at dispatch time too, including
+            # stale keyboards and forged callback payloads.
+            inputs["self_config"] = "false"
         inputs["device_serial"] = serial
         if self.settings.github_use_gh_cli:
             args = [

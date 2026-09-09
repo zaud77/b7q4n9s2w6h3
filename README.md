@@ -9,7 +9,7 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 - 进入频道后必须仍是指定频道成员，且序列号处于启用状态，才显示并触发构建。
 - `/allow` 和白名单文件只登记序列号，不要求 Telegram ID；用户首次通过入频道验证时自动绑定其 Telegram 账号，防止之后被他人借用。
 - 菜单支持 6.12.23、6.12.38 Ace6T、6.12.38 OnePlus 15T、6.12.58。
-- 支持 KernelSU 分支、SUSFS、NoMount、KPM、LZ4/Zstd、LZ4KD、zarm、Unicode、BBR/Brutal、Droidspaces、网络增强、ADIOS、Re-Kernel、基带保护和自用配置。
+- 支持 KernelSU 分支、SUSFS、NoMount、KPM、LZ4/Zstd、LZ4KD、zarm、Unicode、BBR/Brutal、Droidspaces、网络增强、ADIOS、Re-Kernel和基带保护；自用配置仅所有者可见、可启用。
 - SUSFS/NoMount 自动互斥，zarm 强制依赖 LZ4KD；触发前再次检查频道和数据库。
 - 只有 `ADMIN_USER_IDS` 中的所有者可使用管理员命令：`/allow 序列号`、`/revoke 序列号`、`/allowed`、`/joinlink`。
 - `/allowed` 会分多条消息显示完整白名单，不再只显示尾号或截断前 100 条。

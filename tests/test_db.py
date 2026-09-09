@@ -1,5 +1,5 @@
 from kernel_build_bot.db import Database
-from kernel_build_bot.bot import parse_whitelist
+from kernel_build_bot.bot import KernelBuildBot, defaults, parse_whitelist
 
 
 def test_serial_owner_and_revoke(tmp_path):
@@ -43,3 +43,12 @@ def test_parse_whitelist():
         ("3B162200MZ300000", None),
     ]
     assert len(errors) == 1
+
+
+def test_self_config_is_hidden_from_non_owner_build_menu():
+    public_markup = KernelBuildBot.options_markup(None, defaults(), False)
+    owner_markup = KernelBuildBot.options_markup(None, defaults(), True)
+    public_labels = [button.text for row in public_markup.inline_keyboard for button in row]
+    owner_labels = [button.text for row in owner_markup.inline_keyboard for button in row]
+    assert not any("自用配置" in label for label in public_labels)
+    assert any("自用配置" in label for label in owner_labels)
