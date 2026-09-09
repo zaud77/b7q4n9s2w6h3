@@ -15,7 +15,7 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 
 import httpx
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -491,6 +491,24 @@ class KernelBuildBot:
         }
 
     async def post_init(self, application: Application) -> None:
+        public_commands = [
+            BotCommand("start", "启动机器人"),
+            BotCommand("join", "验证序列号并申请加入频道"),
+            BotCommand("build", "构建绑定设备的内核"),
+        ]
+        owner_commands = public_commands + [
+            BotCommand("buildfor", "为指定白名单序列号构建"),
+            BotCommand("allow", "添加白名单序列号"),
+            BotCommand("revoke", "撤销白名单序列号"),
+            BotCommand("allowed", "查看完整白名单"),
+            BotCommand("joinlink", "获取入频道验证链接"),
+        ]
+        await application.bot.set_my_commands(public_commands)
+        for admin_user_id in self.settings.admin_user_ids:
+            await application.bot.set_my_commands(
+                owner_commands,
+                scope=BotCommandScopeChat(chat_id=admin_user_id),
+            )
         self._monitor_task = asyncio.create_task(self.monitor_builds(application))
 
     async def post_shutdown(self, application: Application) -> None:
