@@ -102,6 +102,16 @@ class KernelBuildBot:
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.settings.admin_user_ids
 
+    async def reject_while_building(self, update: Update) -> bool:
+        if not self.db.has_active_build_job():
+            return False
+        text = "当前正在构建内核，请等待本次构建完成。"
+        if update.callback_query:
+            await update.callback_query.answer(text, show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(text)
+        return True
+
     def daily_build_count(self, user_id: int) -> int:
         now = datetime.now(BUILD_TIMEZONE)
         start = datetime.combine(now.date(), datetime_time.min, tzinfo=BUILD_TIMEZONE)
@@ -123,11 +133,15 @@ class KernelBuildBot:
         }
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         await update.effective_message.reply_text(
             "OnePlus GKI 构建机器人已部署并启动；发送 /build 可选择内核版本和功能。"
         )
 
     async def join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         context.user_data.clear()
         context.user_data["awaiting_join_serial"] = True
         await update.effective_message.reply_text("请输入设备序列号：")
@@ -136,12 +150,19 @@ class KernelBuildBot:
         request = update.chat_join_request
         if request.chat.id != self.settings.required_channel_id:
             return
+        if self.db.has_active_build_job():
+            await context.bot.send_message(
+                request.user_chat_id, "当前正在构建内核，请等待本次构建完成后重新申请。"
+            )
+            return
         self.db.set_pending_join(request.from_user.id, request.user_chat_id)
         context.user_data.clear()
         context.user_data["awaiting_join_serial"] = True
         await context.bot.send_message(request.user_chat_id, "请输入设备序列号：")
 
     async def build(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         user = update.effective_user
         if not await self.is_channel_member(context, user.id):
             await update.effective_message.reply_text("尚未通过入频道验证，请先使用 /join。")
@@ -188,6 +209,8 @@ class KernelBuildBot:
         await update.effective_message.reply_text(prompt, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         if context.user_data is None or not context.user_data.get("awaiting_join_serial"):
             return
         serial = update.effective_message.text.strip()
@@ -245,6 +268,8 @@ class KernelBuildBot:
 
     async def callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
+        if await self.reject_while_building(update):
+            return
         await query.answer()
         data = query.data
         if data == "cancel":
@@ -317,6 +342,9 @@ class KernelBuildBot:
 
     async def dispatch(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = query.from_user.id
+        if self.db.has_active_build_job():
+            await query.answer("当前正在构建内核，请等待本次构建完成。", show_alert=True)
+            return
         serial = context.user_data.get("serial", "")
         workflow_key = context.user_data.get("workflow", "")
         if not await self.is_channel_member(context, user_id) or not self.db.verify_serial(serial, user_id):
@@ -590,6 +618,8 @@ class KernelBuildBot:
             self.db.update_build_job(request_id, "sent", run_id)
 
     async def allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         if not self.is_admin(update.effective_user.id):
             await update.effective_message.reply_text("无权使用管理员命令。")
             return
@@ -600,6 +630,8 @@ class KernelBuildBot:
         await update.effective_message.reply_text(f"已允许尾号 {context.args[0][-4:]}。")
 
     async def revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         if not self.is_admin(update.effective_user.id):
             await update.effective_message.reply_text("无权使用管理员命令。")
             return
@@ -610,6 +642,8 @@ class KernelBuildBot:
         await update.effective_message.reply_text("已撤销。" if changed else "数据库中没有该序列号。")
 
     async def allowed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         if not self.is_admin(update.effective_user.id):
             await update.effective_message.reply_text("无权使用管理员命令。")
             return
@@ -631,6 +665,8 @@ class KernelBuildBot:
         await update.effective_message.reply_text(chunk)
 
     async def join_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         if not self.is_admin(update.effective_user.id):
             await update.effective_message.reply_text("无权使用管理员命令。")
             return
@@ -644,6 +680,8 @@ class KernelBuildBot:
         )
 
     async def whitelist_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
         if not self.is_admin(update.effective_user.id):
             await update.effective_message.reply_text("无权导入白名单。")
             return
@@ -675,6 +713,11 @@ class KernelBuildBot:
                 summary += f"\n……另有 {len(errors) - 20} 行"
         await update.effective_message.reply_text(summary)
 
+    async def unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
+        await update.effective_message.reply_text("未知命令。请使用 /start、/join 或 /build。")
+
     def application(self) -> Application:
         app = (
             Application.builder()
@@ -690,6 +733,7 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("revoke", self.revoke))
         app.add_handler(CommandHandler("allowed", self.allowed))
         app.add_handler(CommandHandler("joinlink", self.join_link))
+        app.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
         app.add_handler(ChatJoinRequestHandler(self.join_request))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.Document.ALL, self.whitelist_document))
