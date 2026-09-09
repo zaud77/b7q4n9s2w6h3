@@ -159,7 +159,9 @@ class KernelBuildBot:
             )
             return
         context.user_data.clear()
-        bound_workflow = self.db.workflow_for_user(user.id)
+        # The owner can choose any workflow on every build. Regular users keep
+        # their first selected workflow binding.
+        bound_workflow = None if self.is_admin(user.id) else self.db.workflow_for_user(user.id)
         options = defaults()
         if bound_workflow == "638t":
             options["lz4_enable"] = "false"
@@ -182,9 +184,8 @@ class KernelBuildBot:
             return
         keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
         keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-        await update.effective_message.reply_text(
-            "首次构建，请选择要绑定的构建脚本：", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        prompt = "请选择本次构建脚本：" if self.is_admin(user.id) else "首次构建，请选择要绑定的构建脚本："
+        await update.effective_message.reply_text(prompt, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if context.user_data is None or not context.user_data.get("awaiting_join_serial"):
@@ -258,11 +259,12 @@ class KernelBuildBot:
             if self.db.workflow_maintenance(key):
                 await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
                 return
-            bound_workflow = self.db.bind_workflow(query.from_user.id, key)
-            if bound_workflow != key:
-                await query.answer("该账号已绑定其他构建脚本", show_alert=True)
-                await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
-                return
+            if not self.is_admin(query.from_user.id):
+                bound_workflow = self.db.bind_workflow(query.from_user.id, key)
+                if bound_workflow != key:
+                    await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                    await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
+                    return
             context.user_data["workflow"] = key
             if key == "638t":
                 # Keep the first device-side test as close as possible to the
@@ -343,7 +345,7 @@ class KernelBuildBot:
                 f"{WORKFLOWS[workflow_key][0]} 正在建立持久缓存，暂时不能提交构建。"
             )
             return
-        if self.db.workflow_for_user(user_id) != workflow_key:
+        if not self.is_admin(user_id) and self.db.workflow_for_user(user_id) != workflow_key:
             await query.edit_message_text("构建脚本绑定复核失败，请重新使用 /build。")
             return
         _, workflow = WORKFLOWS[workflow_key]
