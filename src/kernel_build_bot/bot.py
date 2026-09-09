@@ -547,6 +547,7 @@ class KernelBuildBot:
                     "AK3",
                     re.compile(r"^(AnyKernel3|ak3)_.*\.zip$", re.I),
                     "构建完成，刷机前请确认机型和序列号。",
+                    True,
                 )
             ]
             if nomount_requested:
@@ -555,11 +556,12 @@ class KernelBuildBot:
                         "NoMount",
                         re.compile(r"^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$", re.I),
                         "NoMount 模块已随本次构建生成，请在对应内核上安装。",
+                        False,
                     )
                 )
 
             selected_packages = []
-            for package_type, filename_pattern, caption in packages:
+            for package_type, filename_pattern, caption, extract_nested in packages:
                 artifact = next(
                     (
                         item
@@ -576,11 +578,13 @@ class KernelBuildBot:
                         run_id,
                     )
                     return
-                selected_packages.append((artifact, filename_pattern, caption))
+                selected_packages.append((artifact, filename_pattern, caption, extract_nested))
 
             with tempfile.TemporaryDirectory(prefix="oneplus-gki-") as temp_dir:
                 temp = Path(temp_dir)
-                for index, (artifact, filename_pattern, caption) in enumerate(selected_packages):
+                for index, (artifact, filename_pattern, caption, extract_nested) in enumerate(
+                    selected_packages
+                ):
                     archive_path = temp / f"artifact-download-{index}.zip"
                     async with client.stream("GET", artifact["archive_download_url"]) as download:
                         download.raise_for_status()
@@ -592,18 +596,19 @@ class KernelBuildBot:
                     send_name = artifact["name"]
                     if not send_name.lower().endswith(".zip"):
                         send_name += ".zip"
-                    with zipfile.ZipFile(archive_path) as archive:
-                        nested = [
-                            info
-                            for info in archive.infolist()
-                            if not info.is_dir()
-                            and filename_pattern.match(Path(info.filename).name)
-                        ]
-                        if len(nested) == 1:
-                            send_name = Path(nested[0].filename).name
-                            send_path = temp / f"{index}-{send_name}"
-                            with archive.open(nested[0]) as source, send_path.open("wb") as output:
-                                shutil.copyfileobj(source, output)
+                    if extract_nested:
+                        with zipfile.ZipFile(archive_path) as archive:
+                            nested = [
+                                info
+                                for info in archive.infolist()
+                                if not info.is_dir()
+                                and filename_pattern.match(Path(info.filename).name)
+                            ]
+                            if len(nested) == 1:
+                                send_name = Path(nested[0].filename).name
+                                send_path = temp / f"{index}-{send_name}"
+                                with archive.open(nested[0]) as source, send_path.open("wb") as output:
+                                    shutil.copyfileobj(source, output)
 
                     with send_path.open("rb") as document:
                         await application.bot.send_document(
