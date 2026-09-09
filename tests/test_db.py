@@ -63,6 +63,16 @@ def test_pending_build_job_survives_database_reopen(tmp_path):
     assert db.pending_build_jobs() == []
 
 
+def test_global_quota_reset_keeps_build_history(tmp_path):
+    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    db.record_build(42, "3B15A800Y5D00000", "build.yml", "{}")
+    reset_at = db.reset_all_build_quotas()
+
+    assert db.quota_reset_at() == reset_at
+    assert db.count_builds(42, reset_at + 1, 4_102_444_800) == 0
+    assert db.count_builds(42, 0, 4_102_444_800) == 1
+
+
 def test_parse_whitelist():
     rows, errors = parse_whitelist(
         "# comment\n3B15A800Y5D00000\n3B164V00HYR00000,42\n"

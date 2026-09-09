@@ -62,6 +62,10 @@ class Database:
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(serials)")}
@@ -206,6 +210,23 @@ class Database:
                 (user_id, since, before),
             ).fetchone()
             return int(row["total"])
+
+    def quota_reset_at(self) -> int:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT value FROM bot_state WHERE key='quota_reset_at'"
+            ).fetchone()
+        return int(row["value"]) if row else 0
+
+    def reset_all_build_quotas(self, reset_at: int | None = None) -> int:
+        timestamp = int(time.time()) if reset_at is None else reset_at
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO bot_state(key, value) VALUES ('quota_reset_at', ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (str(timestamp),),
+            )
+        return timestamp
 
     def record_build(self, user_id: int, serial: str, workflow: str, inputs: str) -> None:
         with self._connect() as db:

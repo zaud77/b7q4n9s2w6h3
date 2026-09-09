@@ -106,7 +106,9 @@ class KernelBuildBot:
         now = datetime.now(BUILD_TIMEZONE)
         start = datetime.combine(now.date(), datetime_time.min, tzinfo=BUILD_TIMEZONE)
         end = start + timedelta(days=1)
-        return self.db.count_builds(user_id, int(start.timestamp()), int(end.timestamp()))
+        reset_at = self.db.quota_reset_at()
+        quota_start = max(int(start.timestamp()), reset_at + 1 if reset_at else 0)
+        return self.db.count_builds(user_id, quota_start, int(end.timestamp()))
 
     async def is_channel_member(self, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
         try:
@@ -148,7 +150,10 @@ class KernelBuildBot:
         if not serial:
             await update.effective_message.reply_text("当前 Telegram 账号尚未绑定有效序列号，请先使用 /join。")
             return
-        if self.daily_build_count(user.id) >= self.settings.daily_build_limit:
+        if (
+            not self.is_admin(user.id)
+            and self.daily_build_count(user.id) >= self.settings.daily_build_limit
+        ):
             await update.effective_message.reply_text(
                 f"今天已达到 {self.settings.daily_build_limit} 次构建上限，请在北京时间次日再试。"
             )
@@ -308,11 +313,15 @@ class KernelBuildBot:
             context.user_data.clear()
             await query.edit_message_text("最终授权检查失败，未触发构建。")
             return
-        wait = self.db.seconds_until_allowed(user_id, self.settings.cooldown_seconds)
-        if wait:
-            await query.answer(f"请在 {wait} 秒后再构建", show_alert=True)
-            return
-        if self.daily_build_count(user_id) >= self.settings.daily_build_limit:
+        if not self.is_admin(user_id):
+            wait = self.db.seconds_until_allowed(user_id, self.settings.cooldown_seconds)
+            if wait:
+                await query.answer(f"请在 {wait} 秒后再构建", show_alert=True)
+                return
+        if (
+            not self.is_admin(user_id)
+            and self.daily_build_count(user_id) >= self.settings.daily_build_limit
+        ):
             await query.answer(
                 f"今天已达到 {self.settings.daily_build_limit} 次构建上限",
                 show_alert=True,
