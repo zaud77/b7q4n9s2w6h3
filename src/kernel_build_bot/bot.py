@@ -169,6 +169,11 @@ class KernelBuildBot:
             if bound_workflow not in WORKFLOWS:
                 await update.effective_message.reply_text("已绑定的构建脚本当前不可用，请联系管理员。")
                 return
+            if self.db.workflow_maintenance(bound_workflow):
+                await update.effective_message.reply_text(
+                    f"{WORKFLOWS[bound_workflow][0]} 正在建立持久缓存，暂时不能提交构建。"
+                )
+                return
             context.user_data["workflow"] = bound_workflow
             await update.effective_message.reply_text(
                 f"已绑定：{WORKFLOWS[bound_workflow][0]}\n请选择功能：",
@@ -250,6 +255,9 @@ class KernelBuildBot:
             if key not in WORKFLOWS or "serial" not in context.user_data:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
                 return
+            if self.db.workflow_maintenance(key):
+                await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
+                return
             bound_workflow = self.db.bind_workflow(query.from_user.id, key)
             if bound_workflow != key:
                 await query.answer("该账号已绑定其他构建脚本", show_alert=True)
@@ -329,6 +337,11 @@ class KernelBuildBot:
             return
         if workflow_key not in WORKFLOWS:
             await query.edit_message_text("未选择有效工作流。")
+            return
+        if self.db.workflow_maintenance(workflow_key):
+            await query.edit_message_text(
+                f"{WORKFLOWS[workflow_key][0]} 正在建立持久缓存，暂时不能提交构建。"
+            )
             return
         if self.db.workflow_for_user(user_id) != workflow_key:
             await query.edit_message_text("构建脚本绑定复核失败，请重新使用 /build。")

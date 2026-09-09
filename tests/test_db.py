@@ -73,6 +73,16 @@ def test_global_quota_reset_keeps_build_history(tmp_path):
     assert db.count_builds(42, 0, 4_102_444_800) == 1
 
 
+def test_workflow_maintenance_flag_persists(tmp_path):
+    path = str(tmp_path / "bot.db")
+    db = Database(path, "test-pepper")
+    assert not db.workflow_maintenance("623")
+    db.set_workflow_maintenance("623", True)
+    assert Database(path, "test-pepper").workflow_maintenance("623")
+    db.set_workflow_maintenance("623", False)
+    assert not db.workflow_maintenance("623")
+
+
 def test_parse_whitelist():
     rows, errors = parse_whitelist(
         "# comment\n3B15A800Y5D00000\n3B164V00HYR00000,42\n"

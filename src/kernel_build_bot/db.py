@@ -228,6 +228,22 @@ class Database:
             )
         return timestamp
 
+    def workflow_maintenance(self, workflow_key: str) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT value FROM bot_state WHERE key=?",
+                (f"workflow_maintenance:{workflow_key}",),
+            ).fetchone()
+        return bool(row and row["value"] == "1")
+
+    def set_workflow_maintenance(self, workflow_key: str, enabled: bool) -> None:
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO bot_state(key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (f"workflow_maintenance:{workflow_key}", "1" if enabled else "0"),
+            )
+
     def record_build(self, user_id: int, serial: str, workflow: str, inputs: str) -> None:
         with self._connect() as db:
             db.execute(
