@@ -103,7 +103,8 @@ class KernelBuildBot:
         return user_id in self.settings.admin_user_ids
 
     async def reject_while_building(self, update: Update) -> bool:
-        if not self.db.has_active_build_job():
+        user = update.effective_user
+        if user is None or not self.db.has_active_build_job(user.id):
             return False
         text = "当前正在构建内核，请等待本次构建完成。"
         if update.callback_query:
@@ -150,7 +151,7 @@ class KernelBuildBot:
         request = update.chat_join_request
         if request.chat.id != self.settings.required_channel_id:
             return
-        if self.db.has_active_build_job():
+        if self.db.has_active_build_job(request.from_user.id):
             await context.bot.send_message(
                 request.user_chat_id, "当前正在构建内核，请等待本次构建完成后重新申请。"
             )
@@ -342,7 +343,7 @@ class KernelBuildBot:
 
     async def dispatch(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = query.from_user.id
-        if self.db.has_active_build_job():
+        if self.db.has_active_build_job(user_id):
             await query.answer("当前正在构建内核，请等待本次构建完成。", show_alert=True)
             return
         serial = context.user_data.get("serial", "")

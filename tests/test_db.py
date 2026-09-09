@@ -57,12 +57,15 @@ def test_pending_build_job_survives_database_reopen(tmp_path):
     assert job["github_run_id"] is None
     assert job["inputs"] == '{"nomount_enable": "true"}'
     assert db.has_active_build_job()
+    assert db.has_active_build_job(42)
+    assert not db.has_active_build_job(43)
     db.update_build_job("request-1", "running", 1234)
     job = db.pending_build_jobs()[0]
     assert job["github_run_id"] == 1234
     db.update_build_job("request-1", "sent", 1234)
     assert db.pending_build_jobs() == []
     assert not db.has_active_build_job()
+    assert not db.has_active_build_job(42)
 
 
 def test_global_quota_reset_keeps_build_history(tmp_path):

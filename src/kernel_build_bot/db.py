@@ -279,13 +279,22 @@ class Database:
                    ORDER BY created_at"""
             ).fetchall()
 
-    def has_active_build_job(self) -> bool:
+    def has_active_build_job(self, user_id: int | None = None) -> bool:
         with self._connect() as db:
-            row = db.execute(
-                """SELECT 1 FROM build_jobs
-                   WHERE status IN ('submitted', 'running', 'delivery_pending')
-                   LIMIT 1"""
-            ).fetchone()
+            if user_id is None:
+                row = db.execute(
+                    """SELECT 1 FROM build_jobs
+                       WHERE status IN ('submitted', 'running', 'delivery_pending')
+                       LIMIT 1"""
+                ).fetchone()
+            else:
+                row = db.execute(
+                    """SELECT 1 FROM build_jobs
+                       WHERE telegram_user_id=?
+                         AND status IN ('submitted', 'running', 'delivery_pending')
+                       LIMIT 1""",
+                    (user_id,),
+                ).fetchone()
         return row is not None
 
     def update_build_job(
