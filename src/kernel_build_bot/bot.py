@@ -5,12 +5,20 @@ import json
 import logging
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    ChatJoinRequestHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from .config import Settings
 from .db import Database
@@ -105,22 +113,23 @@ class KernelBuildBot:
         }
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user_id = update.effective_user.id
-        if await self.is_channel_member(context, user_id):
-            await update.effective_message.reply_text(
-                "频道成员验证通过。使用 /build 发起内核构建。构建前仍会复核序列号白名单。"
-            )
-            return
-        context.user_data.clear()
-        context.user_data["awaiting_join_serial"] = True
         await update.effective_message.reply_text(
-            "请先输入设备序列号。白名单验证通过后，机器人会签发限时、一次性频道邀请链接。"
+            "OnePlus GKI 构建机器人已部署并启动；发送 /build 可选择内核版本和功能。"
         )
 
     async def join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.clear()
         context.user_data["awaiting_join_serial"] = True
-        await update.effective_message.reply_text("请输入白名单设备序列号：")
+        await update.effective_message.reply_text("请输入设备序列号：")
+
+    async def join_request(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        request = update.chat_join_request
+        if request.chat.id != self.settings.required_channel_id:
+            return
+        self.db.set_pending_join(request.from_user.id, request.user_chat_id)
+        context.user_data.clear()
+        context.user_data["awaiting_join_serial"] = True
+        await context.bot.send_message(request.user_chat_id, "请输入设备序列号：")
 
     async def build(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -142,7 +151,6 @@ class KernelBuildBot:
             return
         user_id = update.effective_user.id
         if not self.db.verify_serial(serial, user_id):
-            context.user_data.clear()
             await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
             return
         if joining:
@@ -150,22 +158,21 @@ class KernelBuildBot:
                 context.user_data.clear()
                 await update.effective_message.reply_text("序列号和频道成员身份均已验证，可使用 /build。")
                 return
-            try:
-                invite = await context.bot.create_chat_invite_link(
-                    chat_id=self.settings.required_channel_id,
-                    name=f"serial-{serial[-4:]}-user-{user_id}",
-                    expire_date=datetime.now(timezone.utc) + timedelta(minutes=10),
-                    member_limit=1,
+            pending = self.db.get_pending_join(user_id)
+            if not pending:
+                await update.effective_message.reply_text(
+                    "序列号验证通过。请先打开管理员发送的频道申请链接并提交加入请求，机器人收到后会自动验证。"
                 )
-            except Exception:
-                logging.exception("failed to create one-time invite")
-                await update.effective_message.reply_text("序列号已通过，但邀请链接签发失败，请联系管理员。")
                 return
+            try:
+                await context.bot.approve_chat_join_request(self.settings.required_channel_id, user_id)
+            except Exception:
+                logging.exception("failed to approve channel join request")
+                await update.effective_message.reply_text("序列号已通过，但批准入群失败，请联系管理员。")
+                return
+            self.db.clear_pending_join(user_id)
             context.user_data.clear()
-            await update.effective_message.reply_text(
-                "序列号验证通过。以下链接 10 分钟内有效且只能使用 1 次：\n"
-                f"{invite.invite_link}\n\n加入后使用 /build。"
-            )
+            await update.effective_message.reply_text("序列号验证通过，已批准进入频道。加入后可使用 /build。")
             return
         if not await self.is_channel_member(context, user_id):
             context.user_data.clear()
@@ -305,6 +312,7 @@ class KernelBuildBot:
 
     async def allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("无权使用管理员命令。")
             return
         if not context.args or not SERIAL_RE.fullmatch(context.args[0]):
             await update.effective_message.reply_text("用法：/allow 序列号 [绑定的Telegram用户ID]")
@@ -315,6 +323,7 @@ class KernelBuildBot:
 
     async def revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("无权使用管理员命令。")
             return
         if not context.args or not SERIAL_RE.fullmatch(context.args[0]):
             await update.effective_message.reply_text("用法：/revoke 序列号")
@@ -324,16 +333,41 @@ class KernelBuildBot:
 
     async def allowed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("无权使用管理员命令。")
             return
         rows = self.db.list_serials()
-        text = "\n".join(
-            f"…{row['serial_tail']} | 用户 {row['owner_user_id'] or '不限'} | {'启用' if row['enabled'] else '停用'}"
-            for row in rows[:100]
-        ) or "数据库为空。"
-        await update.effective_message.reply_text(text)
+        lines = [
+            f"{row['serial_value'] or '…' + row['serial_tail']} | 用户 {row['owner_user_id'] or '不限'} | "
+            f"{'启用' if row['enabled'] else '停用'}"
+            for row in rows
+        ]
+        if not lines:
+            await update.effective_message.reply_text("数据库为空。")
+            return
+        chunk = "白名单序列号："
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 3900:
+                await update.effective_message.reply_text(chunk)
+                chunk = "白名单序列号（续）："
+            chunk += "\n" + line
+        await update.effective_message.reply_text(chunk)
+
+    async def join_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self.is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("无权使用管理员命令。")
+            return
+        invite = await context.bot.create_chat_invite_link(
+            chat_id=self.settings.required_channel_id,
+            name=f"serial-approval-{datetime.now(timezone.utc):%Y%m%d}",
+            creates_join_request=True,
+        )
+        await update.effective_message.reply_text(
+            "这是需要机器人审核的频道申请链接，用户不能直接进入：\n" + invite.invite_link
+        )
 
     async def whitelist_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("无权导入白名单。")
             return
         document = update.effective_message.document
         name = (document.file_name or "").lower()
@@ -370,7 +404,9 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("build", self.build))
         app.add_handler(CommandHandler("allow", self.allow))
         app.add_handler(CommandHandler("revoke", self.revoke))
-        app.add_handler(CommandHandler("allowed", self.allowed))
+        app.add_handler(CommandHandler(["allowed", "allwed"], self.allowed))
+        app.add_handler(CommandHandler("joinlink", self.join_link))
+        app.add_handler(ChatJoinRequestHandler(self.join_request))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.Document.ALL, self.whitelist_document))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message))

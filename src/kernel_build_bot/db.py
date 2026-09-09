@@ -26,6 +26,7 @@ class Database:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS serials (
                     serial_hash TEXT PRIMARY KEY,
+                    serial_value TEXT,
                     serial_tail TEXT NOT NULL,
                     owner_user_id INTEGER,
                     enabled INTEGER NOT NULL DEFAULT 1,
@@ -40,8 +41,16 @@ class Database:
                     inputs TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS pending_joins (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    user_chat_id INTEGER NOT NULL,
+                    requested_at INTEGER NOT NULL
+                );
                 """
             )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(serials)")}
+            if "serial_value" not in columns:
+                db.execute("ALTER TABLE serials ADD COLUMN serial_value TEXT")
 
     def serial_hash(self, serial: str) -> str:
         return hmac.new(self.pepper, serial.encode("ascii"), hashlib.sha256).hexdigest()
@@ -50,11 +59,14 @@ class Database:
         digest = self.serial_hash(serial)
         with self._connect() as db:
             db.execute(
-                """INSERT INTO serials(serial_hash, serial_tail, owner_user_id, enabled, created_at, created_by)
-                   VALUES (?, ?, ?, 1, ?, ?)
+                """INSERT INTO serials(serial_hash, serial_value, serial_tail, owner_user_id, enabled, created_at, created_by)
+                   VALUES (?, ?, ?, ?, 1, ?, ?)
                    ON CONFLICT(serial_hash) DO UPDATE SET
-                     owner_user_id=excluded.owner_user_id, enabled=1""",
-                (digest, serial[-4:], owner_user_id, int(time.time()), created_by),
+                     serial_value=excluded.serial_value,
+                     serial_tail=excluded.serial_tail,
+                     owner_user_id=excluded.owner_user_id,
+                     enabled=1""",
+                (digest, serial, serial[-4:], owner_user_id, int(time.time()), created_by),
             )
 
     def revoke_serial(self, serial: str) -> bool:
@@ -76,8 +88,31 @@ class Database:
     def list_serials(self) -> list[sqlite3.Row]:
         with self._connect() as db:
             return db.execute(
-                "SELECT serial_tail, owner_user_id, enabled, created_at FROM serials ORDER BY created_at DESC"
+                "SELECT serial_value, serial_tail, owner_user_id, enabled, created_at "
+                "FROM serials ORDER BY enabled DESC, serial_value COLLATE NOCASE, created_at DESC"
             ).fetchall()
+
+    def set_pending_join(self, user_id: int, user_chat_id: int) -> None:
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO pending_joins(telegram_user_id, user_chat_id, requested_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(telegram_user_id) DO UPDATE SET
+                     user_chat_id=excluded.user_chat_id,
+                     requested_at=excluded.requested_at""",
+                (user_id, user_chat_id, int(time.time())),
+            )
+
+    def get_pending_join(self, user_id: int) -> sqlite3.Row | None:
+        with self._connect() as db:
+            return db.execute(
+                "SELECT user_chat_id, requested_at FROM pending_joins WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+
+    def clear_pending_join(self, user_id: int) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM pending_joins WHERE telegram_user_id=?", (user_id,))
 
     def seconds_until_allowed(self, user_id: int, cooldown: int) -> int:
         with self._connect() as db:
@@ -95,4 +130,3 @@ class Database:
                 "INSERT INTO builds(telegram_user_id, serial_hash, workflow, inputs, created_at) VALUES (?, ?, ?, ?, ?)",
                 (user_id, self.serial_hash(serial), workflow, inputs, int(time.time())),
             )
-
