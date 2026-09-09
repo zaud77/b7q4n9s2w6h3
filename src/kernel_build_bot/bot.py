@@ -419,14 +419,43 @@ class KernelBuildBot:
                     params={"event": "workflow_dispatch", "per_page": 50},
                 )
                 response.raise_for_status()
+                workflow_runs = response.json().get("workflow_runs", [])
                 run = next(
                     (
                         item
-                        for item in response.json().get("workflow_runs", [])
+                        for item in workflow_runs
                         if request_id in (item.get("display_title") or "")
                     ),
                     None,
                 )
+                # User-facing run names contain the kernel version and bound
+                # serial. Keep the opaque correlation id in the build job name
+                # and inspect only newly-created candidate runs when needed.
+                if run is None:
+                    created_after = int(job["created_at"]) - 120
+                    for candidate in workflow_runs:
+                        created_text = candidate.get("created_at") or ""
+                        try:
+                            created_ts = int(
+                                datetime.fromisoformat(
+                                    created_text.replace("Z", "+00:00")
+                                ).timestamp()
+                            )
+                        except ValueError:
+                            continue
+                        if created_ts < created_after:
+                            continue
+                        jobs_response = await client.get(
+                            f"{api_root}/actions/runs/{candidate['id']}/jobs",
+                            params={"per_page": 10},
+                        )
+                        jobs_response.raise_for_status()
+                        if any(
+                            request_id in (run_job.get("name") or "")
+                            for run_job in jobs_response.json().get("jobs", [])
+                        ):
+                            run = candidate
+                            break
                 if run is None:
                     if int(time.time()) - int(job["created_at"]) > 900:
                         await application.bot.send_message(
