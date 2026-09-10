@@ -34,7 +34,7 @@ SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{6,64}$")
 
 WORKFLOWS = {
     "623": ("6.12.23 · OnePlus 15", "fastbuild_6.12.23_oneplus_15.yml"),
-    "638a": ("6.12.38 · Ace6T", "fastbuild_6.12.38_ace6t.yml"),
+    "638a": ("6.12.38 · Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"),
     "638t": ("6.12.38 · OnePlus 15T", "fastbuild_6.12.38_oneplus_15t.yml"),
     "658": ("6.12.58", "fastbuild_6.12.58.yml"),
 }
