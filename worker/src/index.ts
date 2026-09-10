@@ -427,6 +427,16 @@ function unwrapArtifact(bytes: Uint8Array, pattern: RegExp): { name: string; byt
   if (matches.length !== 1) return null;
   return { name: matches[0][0].split("/").pop()!, bytes: matches[0][1] };
 }
+
+function ak3DeliveryFilename(workflowFile: string, artifactName: string, inputs: any): string {
+  const serial = String(inputs.device_serial || "unknown").replace(/[^A-Za-z0-9._:-]/g, "_");
+  const target = workflowFile === "build.yml" ? "OP15_6.12.23"
+    : workflowFile.includes("oneplus_15t") ? "OP15T_6.12.38"
+      : workflowFile.includes("6.12.38") ? "Ace6T_6.12.38" : "6.12.58";
+  const ksu = artifactName.match(/_(ReSukiSU|SukiSU|KSUNext|KSU)(?:_(\d+))?_/i);
+  const ksuTag = ksu ? `_${ksu[1]}${ksu[2] ? `_${ksu[2]}` : ""}` : "";
+  return `AK3_${target}${ksuTag}_SN-${serial}.zip`;
+}
 async function processJob(env: Env, job: any) {
   const root = `https://api.github.com/repos/${env.GITHUB_REPO}`; let run: any; let runId = job.github_run_id;
   if (!runId) {
@@ -462,7 +472,7 @@ async function processJob(env: Env, job: any) {
     const artifact = artifacts.find(a => artifactPattern.test(a.name || "") && !a.expired); if (!artifact) return;
     const download = await fetch(artifact.archive_download_url, { headers: ghHeaders(env), redirect: "follow" }); if (!download.ok) throw new Error(`artifact download ${download.status}`);
     const outer = new Uint8Array(await download.arrayBuffer()); const unwrapped = unwrap ? unwrapArtifact(outer, filePattern) : null;
-    const filename = unwrapped?.name || (String(artifact.name).toLowerCase().endsWith(".zip") ? String(artifact.name) : `${artifact.name}.zip`);
+    const filename = unwrapped?.name || ak3DeliveryFilename(job.workflow_file, String(artifact.name), inputs);
     await sendDocument(env, Number(job.chat_id), filename, unwrapped?.bytes || outer, caption);
   }
   await finishJob(env, job.request_id, "sent", runId);
