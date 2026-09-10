@@ -29,9 +29,9 @@ type Session = {
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const WORKFLOWS: Record<string, [string, string]> = {
-  "623": ["6.12.23 · OnePlus 15", "build.yml"],
-  "638a": ["6.12.38 · Ace6T", "fastbuild_6.12.38.yml"],
-  "638t": ["6.12.38 · OnePlus 15T（启动兼容测试）", "fastbuild_6.12.38_oneplus_15t.yml"],
+  "623": ["6.12.23 · OnePlus 15", "fastbuild_6.12.23_oneplus_15.yml"],
+  "638a": ["6.12.38 · Ace6T", "fastbuild_6.12.38_ace6t.yml"],
+  "638t": ["6.12.38 · OnePlus 15T", "fastbuild_6.12.38_oneplus_15t.yml"],
   "658": ["6.12.58", "fastbuild_6.12.58.yml"],
 };
 const BOOL_LABELS: Record<string, string> = {
@@ -435,7 +435,7 @@ function unwrapArtifact(bytes: Uint8Array, pattern: RegExp): { name: string; byt
 
 function ak3DeliveryFilename(workflowFile: string, artifactName: string, inputs: any): string {
   const serial = String(inputs.device_serial || "unknown").replace(/[^A-Za-z0-9._:-]/g, "_");
-  const target = workflowFile === "build.yml" ? "OP15_6.12.23"
+  const target = workflowFile === "fastbuild_6.12.23_oneplus_15.yml" ? "OP15_6.12.23"
     : workflowFile.includes("oneplus_15t") ? "OP15T_6.12.38"
       : workflowFile.includes("6.12.38") ? "Ace6T_6.12.38" : "6.12.58";
   const ksu = artifactName.match(/_(ReSukiSU|SukiSU|KSUNext|KSU)(?:_(\d+))?_/i);
