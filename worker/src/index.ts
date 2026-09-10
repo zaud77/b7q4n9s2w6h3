@@ -317,6 +317,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
   const options = { ...(session.options || defaults()) };
   if (!isAdmin(env, userId)) options.self_config = "false";
+  if (workflowKey !== "623") delete options.self_config;
   const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
@@ -351,7 +352,7 @@ async function handleCallback(env: Env, update: any) {
     session.workflow = key; session.options ||= defaults();
     if (key === "638t") { session.options.lz4_enable = "false"; session.options.unicode_enable = "false"; }
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[key][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId))); return;
+    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[key][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && key === "623")); return;
   }
   const options = session.options;
   if (!options) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
@@ -369,7 +370,7 @@ async function handleCallback(env: Env, update: any) {
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
   } else if (data === "dispatch") { await dispatchBuild(env, query, session); return; }
   await setSession(env, userId, session);
-  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId)) });
+  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId) && session.workflow === "623") });
 }
 
 async function handleJoinRequest(env: Env, update: any) {
