@@ -462,7 +462,8 @@ async function processJob(env: Env, job: any) {
     const artifact = artifacts.find(a => artifactPattern.test(a.name || "") && !a.expired); if (!artifact) return;
     const download = await fetch(artifact.archive_download_url, { headers: ghHeaders(env), redirect: "follow" }); if (!download.ok) throw new Error(`artifact download ${download.status}`);
     const outer = new Uint8Array(await download.arrayBuffer()); const unwrapped = unwrap ? unwrapArtifact(outer, filePattern) : null;
-    await sendDocument(env, Number(job.chat_id), unwrapped?.name || `${artifact.name}.zip`, unwrapped?.bytes || outer, caption);
+    const filename = unwrapped?.name || (String(artifact.name).toLowerCase().endsWith(".zip") ? String(artifact.name) : `${artifact.name}.zip`);
+    await sendDocument(env, Number(job.chat_id), filename, unwrapped?.bytes || outer, caption);
   }
   await finishJob(env, job.request_id, "sent", runId);
 }
