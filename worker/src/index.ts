@@ -456,12 +456,12 @@ async function processJob(env: Env, job: any) {
   const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers: ghHeaders(env) });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
   let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
-  const packages: Array<[RegExp, RegExp, string | undefined]> = [[/^(AnyKernel3|ak3)_.*\.zip$/i, /^(AnyKernel3|ak3)_.*\.zip$/i, isAdmin(env, job.chat_id) ? "构建完成，刷机前请确认机型和序列号。" : undefined]];
-  if (String(inputs.nomount_enable).toLowerCase() === "true") packages.push([/^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$/i, /^NoMount(?:-Suite)?(?:[-_].*)?\.zip$/i, isAdmin(env, job.chat_id) ? "NoMount 模块已随本次构建生成。" : undefined]);
-  for (const [artifactPattern, filePattern, caption] of packages) {
+  const packages: Array<[RegExp, RegExp, string | undefined, boolean]> = [[/^(AnyKernel3|ak3)_.*\.zip$/i, /^(AnyKernel3|ak3)_.*\.zip$/i, isAdmin(env, job.chat_id) ? "构建完成，刷机前请确认机型和序列号。" : undefined, false]];
+  if (String(inputs.nomount_enable).toLowerCase() === "true") packages.push([/^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$/i, /^NoMount(?:-Suite)?(?:[-_].*)?\.zip$/i, isAdmin(env, job.chat_id) ? "NoMount 模块已随本次构建生成。" : undefined, true]);
+  for (const [artifactPattern, filePattern, caption, unwrap] of packages) {
     const artifact = artifacts.find(a => artifactPattern.test(a.name || "") && !a.expired); if (!artifact) return;
     const download = await fetch(artifact.archive_download_url, { headers: ghHeaders(env), redirect: "follow" }); if (!download.ok) throw new Error(`artifact download ${download.status}`);
-    const outer = new Uint8Array(await download.arrayBuffer()); const unwrapped = unwrapArtifact(outer, filePattern);
+    const outer = new Uint8Array(await download.arrayBuffer()); const unwrapped = unwrap ? unwrapArtifact(outer, filePattern) : null;
     await sendDocument(env, Number(job.chat_id), unwrapped?.name || `${artifact.name}.zip`, unwrapped?.bytes || outer, caption);
   }
   await finishJob(env, job.request_id, "sent", runId);
