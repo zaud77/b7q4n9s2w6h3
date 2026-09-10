@@ -6,3 +6,7 @@ __pycache__/
 data/*.db
 data/*.db-*
 logs/
+node_modules/
+.wrangler/
+worker/.dev.vars
+worker/.deploy-secrets

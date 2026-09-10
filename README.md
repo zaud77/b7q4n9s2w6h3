@@ -2,6 +2,8 @@
 
 Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核构建机器人。数据库使用带服务器 pepper 的 HMAC-SHA256 查找序列号，同时在本机数据库保存原值供所有者完整查看；可选绑定 Telegram 用户 ID。
 
+生产环境现已运行在 Cloudflare Workers：Telegram 使用 webhook 调用 Worker，序列号白名单存放在 Workers KV，绑定、会话和构建状态存放在 D1，实际内核编译继续由 GitHub Actions 完成。电脑关机不会影响机器人。
+
 ## 功能
 
 - 使用 `/joinlink` 生成“需要管理员批准”的申请链接；用户点击后不会直接进入频道，机器人会主动私聊并要求输入设备序列号，通过白名单后才批准加入。
@@ -20,6 +22,19 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 - 管理员可直接上传 UTF-8 `.txt`/`.csv` 白名单；每行格式为 `序列号` 或 `序列号,Telegram用户ID`，最多 5000 条。
 
 ## 部署
+
+### Cloudflare Workers（生产）
+
+1. 安装依赖：`pnpm install`。
+2. 创建 KV 和 D1，并把资源 ID 填入 `worker/wrangler.jsonc`。
+3. 执行 `worker/schema.sql` 初始化 D1。
+4. 使用 `wrangler secret put` 配置 `TELEGRAM_BOT_TOKEN`、`GITHUB_TOKEN`、`SERIAL_PEPPER` 和 `WEBHOOK_SECRET`。
+5. 执行 `pnpm run check:worker` 和 `pnpm run deploy:worker`。
+6. 将 Telegram webhook 指向 `/telegram/<WEBHOOK_SECRET>`，并同时设置同值的 `secret_token` 请求头校验。
+
+当前生产入口为 `https://gki.zaomin.dpdns.org`，健康检查路径为 `/health`。`worker/migrate_from_sqlite.py` 可把旧版 `data/bot.db` 中的白名单、绑定和构建历史迁移到 KV/D1；迁移期间不要同时接受新的构建请求。
+
+### Python 长轮询版（备用）
 
 1. 在 Telegram 客户端创建频道，通过 BotFather 创建机器人。
 2. 把机器人加入私密频道并设为管理员，至少授予邀请用户权限；否则无法接收、批准加入请求或稳定检查成员。

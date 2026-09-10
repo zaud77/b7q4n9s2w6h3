@@ -1,0 +1,35 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "oneplus-gki-build-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-10",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "gki.zaomin.dpdns.org", "custom_domain": true }
+  ],
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SERIALS",
+      "id": "a519c80d4ab54443a5639c1cad2af818"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "oneplus-gki-build-bot",
+      "database_id": "2df371c1-33fe-49d3-b795-a7de8d2a18c1"
+    }
+  ],
+  "vars": {
+    "REQUIRED_CHANNEL_ID": "-1003702744725",
+    "REQUIRED_CHANNEL_URL": "https://t.me/cvhhji_oneplus_gki_build_bot",
+    "ADMIN_USER_IDS": "5926546019",
+    "GITHUB_REPO": "cvhhji/oneplus_sm8850_hmbird",
+    "GITHUB_REF": "main",
+    "BUILD_COOLDOWN_SECONDS": "600",
+    "DAILY_BUILD_LIMIT": "2"
+  }
+}

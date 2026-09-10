@@ -1,0 +1,15 @@
+{
+	"private": true,
+	"scripts": {
+		"check:worker": "tsc -p worker/tsconfig.json --noEmit",
+		"deploy:worker": "wrangler deploy --config worker/wrangler.jsonc"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "5.20260908.1",
+		"typescript": "5.9.3",
+		"wrangler": "4.42.0"
+	},
+	"dependencies": {
+		"fflate": "0.8.2"
+	}
+}
