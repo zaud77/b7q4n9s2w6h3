@@ -14,6 +14,8 @@ type Env = {
   GITHUB_REF: string;
   BUILD_COOLDOWN_SECONDS: string;
   DAILY_BUILD_LIMIT: string;
+  DAILY_BUILD_BONUS_DATE?: string;
+  DAILY_BUILD_BONUS?: string;
 };
 
 type Session = {
@@ -311,7 +313,9 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     const beijingNow = now() + 8 * 3600;
     const dayStart = Math.floor(beijingNow / 86400) * 86400 - 8 * 3600;
     const count: any = await env.DB.prepare("SELECT COUNT(*) AS total FROM builds WHERE telegram_user_id=? AND created_at>=?").bind(userId, dayStart).first();
-    const limit = Number(env.DAILY_BUILD_LIMIT || 2);
+    const beijingDate = new Date(beijingNow * 1000).toISOString().slice(0, 10);
+    const dailyBonus = env.DAILY_BUILD_BONUS_DATE === beijingDate ? Number(env.DAILY_BUILD_BONUS || 0) : 0;
+    const limit = Number(env.DAILY_BUILD_LIMIT || 2) + Math.max(0, dailyBonus);
     if (Number(count?.total || 0) >= limit) { await editMessage(env, chatId, messageId, `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。`); return; }
   }
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }

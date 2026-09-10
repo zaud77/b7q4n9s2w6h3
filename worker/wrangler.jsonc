@@ -30,6 +30,8 @@
     "GITHUB_REPO": "cvhhji/oneplus_sm8850_hmbird",
     "GITHUB_REF": "main",
     "BUILD_COOLDOWN_SECONDS": "600",
-    "DAILY_BUILD_LIMIT": "2"
+    "DAILY_BUILD_LIMIT": "2",
+    "DAILY_BUILD_BONUS_DATE": "2026-09-10",
+    "DAILY_BUILD_BONUS": "1"
   }
 }
