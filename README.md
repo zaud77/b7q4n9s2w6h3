@@ -30,7 +30,7 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 3. 执行 `worker/schema.sql` 初始化 D1。
 4. 使用 `wrangler secret put` 配置 `TELEGRAM_BOT_TOKEN`、`GITHUB_TOKEN`、`SERIAL_PEPPER` 和 `WEBHOOK_SECRET`。
 5. 执行 `pnpm run check:worker` 和 `pnpm run deploy:worker`。
-6. 将 Telegram webhook 指向 `/telegram/<WEBHOOK_SECRET>`，并同时设置同值的 `secret_token` 请求头校验。
+6. 将 Telegram webhook 指向 `/telegram/<WEBHOOK_SECRET>`，并同时设置同值的 `secret_token` 请求头校验。必须订阅 `message`、`callback_query` 和 `chat_join_request`；部署后访问 `/setup-webhook/<WEBHOOK_SECRET>` 可自动修正。
 
 当前生产入口为 `https://gki.zaomin.dpdns.org`，健康检查路径为 `/health`。`worker/migrate_from_sqlite.py` 可把旧版 `data/bot.db` 中的白名单、绑定和构建历史迁移到 KV/D1；迁移期间不要同时接受新的构建请求。
 

@@ -32,6 +32,24 @@ from .db import Database
 
 SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{6,64}$")
 
+SCRIPTS = {
+    "623": (
+        "6.12.23 · OnePlus 15",
+        {
+            "gold": ("金标风驰", "623g"),
+            "purple": ("紫标风驰", "623p"),
+        },
+    ),
+    "638t": (
+        "6.12.38 · OnePlus 15T",
+        {
+            "gold": ("金标风驰", "638tg"),
+            "purple": ("紫标风驰", "638tp"),
+        },
+    ),
+    "638a": ("6.12.38 · OnePlus Ace6T", None),
+    "658": ("6.12.58", None),
+}
 WORKFLOWS = {
     "623g": ("6.12.23 · OnePlus 15 · 金标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
     "623p": ("6.12.23 · OnePlus 15 · 紫标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
@@ -40,9 +58,14 @@ WORKFLOWS = {
     "638a": ("6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"),
     "658": ("6.12.58", "fastbuild_6.12.58.yml"),
 }
+WORKFLOW_SCRIPTS = {
+    workflow_key: script_key
+    for script_key, (_, variants) in SCRIPTS.items()
+    for workflow_key in ([item[1] for item in variants.values()] if variants else [script_key])
+}
 ONEPLUS_15_WORKFLOW_KEYS = {"623g", "623p"}
 ONEPLUS_15T_WORKFLOW_KEYS = {"638tg", "638tp"}
-LEGACY_WORKFLOW_KEYS = {"623": "623g", "638t": "638tp"}
+LEGACY_WORKFLOW_KEYS = {key: script_key for key, script_key in WORKFLOW_SCRIPTS.items()}
 
 BOOL_LABELS = {
     "self_config": "自用配置",
@@ -113,6 +136,25 @@ def normalize_workflow_key(workflow_key: str | None) -> str | None:
     if workflow_key is None:
         return None
     return LEGACY_WORKFLOW_KEYS.get(workflow_key, workflow_key)
+
+
+def script_markup() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"kernel:{key}")]
+        for key, (label, _) in SCRIPTS.items()
+    ]
+    keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def variant_markup(script_key: str) -> InlineKeyboardMarkup:
+    variants = SCRIPTS[script_key][1]
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
+        for variant_key, (label, _) in variants.items()
+    ]
+    keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+    return InlineKeyboardMarkup(keyboard)
 
 
 class KernelBuildBot:
@@ -211,30 +253,32 @@ class KernelBuildBot:
             else normalize_workflow_key(self.db.workflow_for_user(user.id))
         )
         options = defaults()
-        if bound_workflow:
-            apply_workflow_defaults(bound_workflow, options)
         context.user_data.update(serial=serial, options=options)
         if bound_workflow:
-            if bound_workflow not in WORKFLOWS:
+            if bound_workflow not in SCRIPTS:
                 await update.effective_message.reply_text("已绑定的构建脚本当前不可用，请联系管理员。")
                 return
-            if self.db.workflow_maintenance(bound_workflow):
+            variants = SCRIPTS[bound_workflow][1]
+            workflow_keys = [workflow_key for _, workflow_key in variants.values()] if variants else [bound_workflow]
+            if any(self.db.workflow_maintenance(workflow_key) for workflow_key in workflow_keys):
                 await update.effective_message.reply_text(
-                    f"{WORKFLOWS[bound_workflow][0]} 正在建立持久缓存，暂时不能提交构建。"
+                    f"{SCRIPTS[bound_workflow][0]} 正在建立持久缓存，暂时不能提交构建。"
                 )
                 return
-            context.user_data["workflow"] = bound_workflow
+            if not variants:
+                context.user_data["workflow"] = bound_workflow
+                apply_workflow_defaults(bound_workflow, options)
             await update.effective_message.reply_text(
-                f"已绑定：{WORKFLOWS[bound_workflow][0]}\n请选择功能：",
-                reply_markup=self.options_markup(
-                    options, self.is_admin(user.id) and supports_self_config(bound_workflow)
-                ),
+                f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择风驰版本："
+                if variants
+                else f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择功能：",
+                reply_markup=variant_markup(bound_workflow)
+                if variants
+                else self.options_markup(options, self.is_admin(user.id) and supports_self_config(bound_workflow)),
             )
             return
-        keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
-        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
         prompt = "请选择本次构建脚本：" if self.is_admin(user.id) else "首次构建，请选择要绑定的构建脚本："
-        await update.effective_message.reply_text(prompt, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.effective_message.reply_text(prompt, reply_markup=script_markup())
 
     async def build_for(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
@@ -263,14 +307,9 @@ class KernelBuildBot:
             owner_directed_build=True,
             delivery_chat_id=user.id,
         )
-        keyboard = [
-            [InlineKeyboardButton(label, callback_data=f"kernel:{key}")]
-            for key, (label, _) in WORKFLOWS.items()
-        ]
-        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await update.effective_message.reply_text(
             f"为序列号 {serial} 构建；完成后的产物只发送给你。\n请选择构建脚本：",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=script_markup(),
         )
 
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -343,20 +382,25 @@ class KernelBuildBot:
             return
         if data.startswith("kernel:"):
             key = data.split(":", 1)[1]
-            if key not in WORKFLOWS or "serial" not in context.user_data:
+            if key not in SCRIPTS or "serial" not in context.user_data:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
                 return
-            if self.db.workflow_maintenance(key):
+            if not SCRIPTS[key][1] and self.db.workflow_maintenance(key):
                 await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
                 return
             if not self.is_admin(query.from_user.id):
-                bound_workflow = normalize_workflow_key(
-                    self.db.bind_workflow(query.from_user.id, key)
-                )
-                if bound_workflow != key:
+                if normalize_workflow_key(self.db.bind_workflow(query.from_user.id, key)) != key:
                     await query.answer("该账号已绑定其他构建脚本", show_alert=True)
                     await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
                     return
+            variants = SCRIPTS[key][1]
+            if variants:
+                context.user_data.pop("workflow", None)
+                await query.edit_message_text(
+                    f"已选择：{SCRIPTS[key][0]}\n请选择风驰版本：",
+                    reply_markup=variant_markup(key),
+                )
+                return
             context.user_data["workflow"] = key
             apply_workflow_defaults(key, context.user_data["options"])
             await query.edit_message_text(
@@ -364,6 +408,26 @@ class KernelBuildBot:
                 reply_markup=self.options_markup(
                     context.user_data["options"],
                     self.is_admin(query.from_user.id) and supports_self_config(key),
+                ),
+            )
+            return
+        if data.startswith("variant:"):
+            _, script_key, variant_key = data.split(":", 2)
+            variants = SCRIPTS.get(script_key, (None, None))[1]
+            if not variants or variant_key not in variants or "serial" not in context.user_data:
+                await query.edit_message_text("会话已失效，请重新使用 /build。")
+                return
+            workflow_key = variants[variant_key][1]
+            if self.db.workflow_maintenance(workflow_key):
+                await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
+                return
+            context.user_data["workflow"] = workflow_key
+            apply_workflow_defaults(workflow_key, context.user_data["options"])
+            await query.edit_message_text(
+                f"已选择：{WORKFLOWS[workflow_key][0]}\n继续选择功能：",
+                reply_markup=self.options_markup(
+                    context.user_data["options"],
+                    self.is_admin(query.from_user.id) and supports_self_config(workflow_key),
                 ),
             )
             return
@@ -452,9 +516,10 @@ class KernelBuildBot:
                 f"{WORKFLOWS[workflow_key][0]} 正在建立持久缓存，暂时不能提交构建。"
             )
             return
+        bound_script = WORKFLOW_SCRIPTS.get(workflow_key, workflow_key)
         if (
             not self.is_admin(user_id)
-            and normalize_workflow_key(self.db.workflow_for_user(user_id)) != workflow_key
+            and normalize_workflow_key(self.db.workflow_for_user(user_id)) != bound_script
         ):
             await query.edit_message_text("构建脚本绑定复核失败，请重新使用 /build。")
             return

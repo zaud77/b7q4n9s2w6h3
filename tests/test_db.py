@@ -1,6 +1,7 @@
 from kernel_build_bot.db import Database
 from kernel_build_bot.bot import (
     KernelBuildBot,
+    SCRIPTS,
     apply_workflow_defaults,
     defaults,
     normalize_workflow_key,
@@ -58,7 +59,9 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
 
 
 def test_workflow_menu_and_oneplus15t_defaults():
-    assert list(WORKFLOWS) == ["623g", "623p", "638tg", "638tp", "638a", "658"]
+    assert list(SCRIPTS) == ["623", "638t", "638a", "658"]
+    assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标风驰", "紫标风驰"]
+    assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标风驰", "紫标风驰"]
     assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
     assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
 
@@ -72,8 +75,10 @@ def test_workflow_menu_and_oneplus15t_defaults():
 
 
 def test_legacy_workflow_bindings_are_normalized():
-    assert normalize_workflow_key("623") == "623g"
-    assert normalize_workflow_key("638t") == "638tp"
+    assert normalize_workflow_key("623") == "623"
+    assert normalize_workflow_key("623g") == "623"
+    assert normalize_workflow_key("638t") == "638t"
+    assert normalize_workflow_key("638tg") == "638t"
     assert normalize_workflow_key("638a") == "638a"
     assert normalize_workflow_key(None) is None
 

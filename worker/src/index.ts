@@ -28,6 +28,18 @@ type Session = {
 };
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
+const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
+  "623": ["6.12.23 · OnePlus 15", {
+    gold: ["金标风驰", "623g"],
+    purple: ["紫标风驰", "623p"],
+  }],
+  "638t": ["6.12.38 · OnePlus 15T", {
+    gold: ["金标风驰", "638tg"],
+    purple: ["紫标风驰", "638tp"],
+  }],
+  "638a": ["6.12.38 · OnePlus Ace6T", null],
+  "658": ["6.12.58", null],
+};
 const WORKFLOWS: Record<string, [string, string]> = {
   "623g": ["6.12.23 · OnePlus 15 · 金标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
   "623p": ["6.12.23 · OnePlus 15 · 紫标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
@@ -36,9 +48,14 @@ const WORKFLOWS: Record<string, [string, string]> = {
   "638a": ["6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"],
   "658": ["6.12.58", "fastbuild_6.12.58.yml"],
 };
+const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
+  Object.entries(SCRIPTS).flatMap(([scriptKey, value]) =>
+    value[1] ? Object.values(value[1]).map(([, workflowKey]) => [workflowKey, scriptKey]) : [[scriptKey, scriptKey]]
+  )
+);
 const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
-const LEGACY_WORKFLOW_KEYS: Record<string, string> = { "623": "623g", "638t": "638tp" };
+const LEGACY_WORKFLOW_KEYS: Record<string, string> = WORKFLOW_SCRIPTS;
 const BOOL_LABELS: Record<string, string> = {
   self_config: "自用配置",
   susfs_enable: "SUSFS",
@@ -193,7 +210,13 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
   return { inline_keyboard: rows };
 }
 function workflowMarkup() {
-  const rows = Object.entries(WORKFLOWS).map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
+  const rows = Object.entries(SCRIPTS).map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
+  rows.push([{ text: "取消", callback_data: "cancel" }]);
+  return { inline_keyboard: rows };
+}
+function variantMarkup(scriptKey: string) {
+  const variants = SCRIPTS[scriptKey][1]!;
+  const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
@@ -245,13 +268,25 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     if (!serial) { await sendMessage(env, chatId, "当前 Telegram 账号尚未绑定有效序列号，请先使用 /join。"); return; }
     const bound = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
     const options = defaults();
-  if (bound) applyWorkflowDefaults(bound, options);
     const session: Session = { serial, options };
     if (bound) {
-      if (!WORKFLOWS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
-      if (await workflowMaintenance(env, bound)) { await sendMessage(env, chatId, `${WORKFLOWS[bound][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
-      session.workflow = bound; await setSession(env, userId, session);
-      await sendMessage(env, chatId, `已绑定：${WORKFLOWS[bound][0]}\n请选择功能：`, optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound))); return;
+      if (!SCRIPTS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
+      const variants = SCRIPTS[bound][1];
+      const workflowKeys = variants ? Object.values(variants).map(([, key]) => key) : [bound];
+      for (const key of workflowKeys) {
+        if (await workflowMaintenance(env, key)) {
+          await sendMessage(env, chatId, `${SCRIPTS[bound][0]} 正在建立持久缓存，暂时不能提交构建。`);
+          return;
+        }
+      }
+      if (!variants) {
+        session.workflow = bound;
+        applyWorkflowDefaults(bound, options);
+      }
+      await setSession(env, userId, session);
+      if (variants) await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择风驰版本：`, variantMarkup(bound));
+      else await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择功能：`, optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound)));
+      return;
     }
     await setSession(env, userId, session);
     await sendMessage(env, chatId, isAdmin(env, userId) ? "请选择本次构建脚本：" : "首次构建，请选择要绑定的构建脚本：", workflowMarkup());
@@ -332,7 +367,8 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await editMessage(env, chatId, messageId, "最终授权检查失败，未触发构建。"); return;
   }
-  if (!isAdmin(env, userId) && (await workflowForUser(env, userId)) !== workflowKey) {
+  const boundScript = WORKFLOW_SCRIPTS[workflowKey] || workflowKey;
+  if (!isAdmin(env, userId) && (await workflowForUser(env, userId)) !== boundScript) {
     await editMessage(env, chatId, messageId, "构建脚本绑定复核失败，请重新使用 /build。"); return;
   }
   if (!isAdmin(env, userId)) {
@@ -380,13 +416,31 @@ async function handleCallback(env: Env, update: any) {
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
   if (data.startsWith("kernel:")) {
     const key = data.slice(7);
-    if (!WORKFLOWS[key] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
-    if (await workflowMaintenance(env, key)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
+    if (!SCRIPTS[key] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
     if (!isAdmin(env, userId) && (await bindWorkflow(env, userId, key)) !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
+    const variants = SCRIPTS[key][1];
+    if (variants) {
+      delete session.workflow;
+      await setSession(env, userId, session);
+      await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key));
+      return;
+    }
+    if (await workflowMaintenance(env, key)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
     session.workflow = key; session.options ||= defaults();
     applyWorkflowDefaults(key, session.options);
     await setSession(env, userId, session);
     await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[key][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(key))); return;
+  }
+  if (data.startsWith("variant:")) {
+    const [, scriptKey, variantKey] = data.split(":");
+    const variants = SCRIPTS[scriptKey]?.[1];
+    if (!variants || !variants[variantKey] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
+    const workflowKey = variants[variantKey][1];
+    if (await workflowMaintenance(env, workflowKey)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
+    session.workflow = workflowKey; session.options ||= defaults();
+    applyWorkflowDefaults(workflowKey, session.options);
+    await setSession(env, userId, session);
+    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[workflowKey][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey))); return;
   }
   const options = session.options;
   if (!options) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
@@ -540,6 +594,16 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, service: "oneplus-gki-build-bot" });
+    if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
+      const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
+      await tg(env, "setWebhook", {
+        url: webhookUrl,
+        secret_token: env.WEBHOOK_SECRET,
+        allowed_updates: ["message", "callback_query", "chat_join_request"],
+        drop_pending_updates: false,
+      });
+      return Response.json({ ok: true, webhook: webhookUrl, allowed_updates: ["message", "callback_query", "chat_join_request"] });
+    }
     if (request.method !== "POST" || url.pathname !== `/telegram/${env.WEBHOOK_SECRET}`) return new Response("Not found", { status: 404 });
     if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
     const update = await request.json(); ctx.waitUntil(handleUpdate(env, update)); return new Response("OK");
