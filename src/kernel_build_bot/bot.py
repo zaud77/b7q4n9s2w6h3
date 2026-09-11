@@ -33,11 +33,16 @@ from .db import Database
 SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{6,64}$")
 
 WORKFLOWS = {
-    "623": ("6.12.23 · OnePlus 15", "fastbuild_6.12.23_oneplus_15.yml"),
+    "623g": ("6.12.23 · OnePlus 15 · 金标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
+    "623p": ("6.12.23 · OnePlus 15 · 紫标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
+    "638tg": ("6.12.38 · OnePlus 15T · 金标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"),
+    "638tp": ("6.12.38 · OnePlus 15T · 紫标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"),
     "638a": ("6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"),
-    "638t": ("6.12.38 · OnePlus 15T", "fastbuild_6.12.38_oneplus_15t.yml"),
     "658": ("6.12.58", "fastbuild_6.12.58.yml"),
 }
+ONEPLUS_15_WORKFLOW_KEYS = {"623g", "623p"}
+ONEPLUS_15T_WORKFLOW_KEYS = {"638tg", "638tp"}
+LEGACY_WORKFLOW_KEYS = {"623": "623g", "638t": "638tp"}
 
 BOOL_LABELS = {
     "self_config": "自用配置",
@@ -91,6 +96,23 @@ def defaults() -> dict[str, str]:
         ccache_debug="false",
     )
     return values
+
+
+def apply_workflow_defaults(workflow_key: str, options: dict[str, str]) -> dict[str, str]:
+    if workflow_key in ONEPLUS_15T_WORKFLOW_KEYS:
+        options["lz4_enable"] = "false"
+        options["unicode_enable"] = "false"
+    return options
+
+
+def supports_self_config(workflow_key: str) -> bool:
+    return workflow_key in ONEPLUS_15_WORKFLOW_KEYS
+
+
+def normalize_workflow_key(workflow_key: str | None) -> str | None:
+    if workflow_key is None:
+        return None
+    return LEGACY_WORKFLOW_KEYS.get(workflow_key, workflow_key)
 
 
 class KernelBuildBot:
@@ -183,11 +205,14 @@ class KernelBuildBot:
         context.user_data.clear()
         # The owner can choose any workflow on every build. Regular users keep
         # their first selected workflow binding.
-        bound_workflow = None if self.is_admin(user.id) else self.db.workflow_for_user(user.id)
+        bound_workflow = (
+            None
+            if self.is_admin(user.id)
+            else normalize_workflow_key(self.db.workflow_for_user(user.id))
+        )
         options = defaults()
-        if bound_workflow == "638t":
-            options["lz4_enable"] = "false"
-            options["unicode_enable"] = "false"
+        if bound_workflow:
+            apply_workflow_defaults(bound_workflow, options)
         context.user_data.update(serial=serial, options=options)
         if bound_workflow:
             if bound_workflow not in WORKFLOWS:
@@ -201,7 +226,9 @@ class KernelBuildBot:
             context.user_data["workflow"] = bound_workflow
             await update.effective_message.reply_text(
                 f"已绑定：{WORKFLOWS[bound_workflow][0]}\n请选择功能：",
-                reply_markup=self.options_markup(options, self.is_admin(user.id)),
+                reply_markup=self.options_markup(
+                    options, self.is_admin(user.id) and supports_self_config(bound_workflow)
+                ),
             )
             return
         keyboard = [[InlineKeyboardButton(label, callback_data=f"kernel:{key}")] for key, (label, _) in WORKFLOWS.items()]
@@ -323,22 +350,20 @@ class KernelBuildBot:
                 await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
                 return
             if not self.is_admin(query.from_user.id):
-                bound_workflow = self.db.bind_workflow(query.from_user.id, key)
+                bound_workflow = normalize_workflow_key(
+                    self.db.bind_workflow(query.from_user.id, key)
+                )
                 if bound_workflow != key:
                     await query.answer("该账号已绑定其他构建脚本", show_alert=True)
                     await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
                     return
             context.user_data["workflow"] = key
-            if key == "638t":
-                # Keep the first device-side test as close as possible to the
-                # upstream OP15T booting baseline. Users can opt features in.
-                options = context.user_data["options"]
-                options["lz4_enable"] = "false"
-                options["unicode_enable"] = "false"
+            apply_workflow_defaults(key, context.user_data["options"])
             await query.edit_message_text(
                 f"已选择：{WORKFLOWS[key][0]}\n继续选择功能：",
                 reply_markup=self.options_markup(
-                    context.user_data["options"], self.is_admin(query.from_user.id)
+                    context.user_data["options"],
+                    self.is_admin(query.from_user.id) and supports_self_config(key),
                 ),
             )
             return
@@ -374,8 +399,12 @@ class KernelBuildBot:
         elif data == "dispatch":
             await self.dispatch(query, context)
             return
+        workflow_key = context.user_data.get("workflow", "")
         await query.edit_message_reply_markup(
-            reply_markup=self.options_markup(options, self.is_admin(query.from_user.id))
+            reply_markup=self.options_markup(
+                options,
+                self.is_admin(query.from_user.id) and supports_self_config(workflow_key),
+            )
         )
 
     async def dispatch(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -423,12 +452,17 @@ class KernelBuildBot:
                 f"{WORKFLOWS[workflow_key][0]} 正在建立持久缓存，暂时不能提交构建。"
             )
             return
-        if not self.is_admin(user_id) and self.db.workflow_for_user(user_id) != workflow_key:
+        if (
+            not self.is_admin(user_id)
+            and normalize_workflow_key(self.db.workflow_for_user(user_id)) != workflow_key
+        ):
             await query.edit_message_text("构建脚本绑定复核失败，请重新使用 /build。")
             return
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
-        if not self.is_admin(user_id):
+        if not supports_self_config(workflow_key):
+            inputs.pop("self_config", None)
+        elif not self.is_admin(user_id):
             # Enforce owner-only configuration at dispatch time too, including
             # stale keyboards and forged callback payloads.
             inputs["self_config"] = "false"

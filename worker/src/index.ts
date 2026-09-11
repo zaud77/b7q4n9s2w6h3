@@ -29,11 +29,16 @@ type Session = {
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const WORKFLOWS: Record<string, [string, string]> = {
-  "623": ["6.12.23 · OnePlus 15", "fastbuild_6.12.23_oneplus_15.yml"],
+  "623g": ["6.12.23 · OnePlus 15 · 金标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
+  "623p": ["6.12.23 · OnePlus 15 · 紫标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
+  "638tg": ["6.12.38 · OnePlus 15T · 金标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"],
+  "638tp": ["6.12.38 · OnePlus 15T · 紫标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
   "638a": ["6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"],
-  "638t": ["6.12.38 · OnePlus 15T", "fastbuild_6.12.38_oneplus_15t.yml"],
   "658": ["6.12.58", "fastbuild_6.12.58.yml"],
 };
+const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
+const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
+const LEGACY_WORKFLOW_KEYS: Record<string, string> = { "623": "623g", "638t": "638tp" };
 const BOOL_LABELS: Record<string, string> = {
   self_config: "自用配置",
   susfs_enable: "SUSFS",
@@ -65,6 +70,20 @@ function defaults(): Record<string, string> {
     bbr_enable: "false", droidspaces_enable: "false",
     ccache_update: "false", ccache_debug: "false",
   });
+}
+function applyWorkflowDefaults(workflowKey: string, options: Record<string, string>): Record<string, string> {
+  if (ONEPLUS_15T_WORKFLOW_KEYS.has(workflowKey)) {
+    options.lz4_enable = "false";
+    options.unicode_enable = "false";
+  }
+  return options;
+}
+function supportsSelfConfig(workflowKey: string): boolean {
+  return ONEPLUS_15_WORKFLOW_KEYS.has(workflowKey);
+}
+function normalizeWorkflowKey(workflowKey: string | null | undefined): string | null {
+  if (!workflowKey) return null;
+  return LEGACY_WORKFLOW_KEYS[workflowKey] || workflowKey;
 }
 
 async function digestSerial(env: Env, serial: string): Promise<string> {
@@ -181,7 +200,7 @@ function workflowMarkup() {
 
 async function workflowForUser(env: Env, userId: number): Promise<string | null> {
   const row: any = await env.DB.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?").bind(userId).first();
-  return row?.workflow_key || null;
+  return normalizeWorkflowKey(row?.workflow_key);
 }
 async function bindWorkflow(env: Env, userId: number, key: string): Promise<string> {
   await env.DB.prepare("INSERT OR IGNORE INTO workflow_bindings(telegram_user_id,workflow_key,bound_at) VALUES(?,?,?)")
@@ -226,13 +245,13 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     if (!serial) { await sendMessage(env, chatId, "当前 Telegram 账号尚未绑定有效序列号，请先使用 /join。"); return; }
     const bound = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
     const options = defaults();
-    if (bound === "638t") { options.lz4_enable = "false"; options.unicode_enable = "false"; }
+  if (bound) applyWorkflowDefaults(bound, options);
     const session: Session = { serial, options };
     if (bound) {
       if (!WORKFLOWS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
       if (await workflowMaintenance(env, bound)) { await sendMessage(env, chatId, `${WORKFLOWS[bound][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
       session.workflow = bound; await setSession(env, userId, session);
-      await sendMessage(env, chatId, `已绑定：${WORKFLOWS[bound][0]}\n请选择功能：`, optionsMarkup(options, false)); return;
+      await sendMessage(env, chatId, `已绑定：${WORKFLOWS[bound][0]}\n请选择功能：`, optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound))); return;
     }
     await setSession(env, userId, session);
     await sendMessage(env, chatId, isAdmin(env, userId) ? "请选择本次构建脚本：" : "首次构建，请选择要绑定的构建脚本：", workflowMarkup());
@@ -332,7 +351,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
   const options = { ...(session.options || defaults()) };
   if (!isAdmin(env, userId)) options.self_config = "false";
-  if (workflowKey !== "623") delete options.self_config;
+  if (!supportsSelfConfig(workflowKey)) delete options.self_config;
   const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
@@ -365,9 +384,9 @@ async function handleCallback(env: Env, update: any) {
     if (await workflowMaintenance(env, key)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
     if (!isAdmin(env, userId) && (await bindWorkflow(env, userId, key)) !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     session.workflow = key; session.options ||= defaults();
-    if (key === "638t") { session.options.lz4_enable = "false"; session.options.unicode_enable = "false"; }
+    applyWorkflowDefaults(key, session.options);
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[key][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && key === "623")); return;
+    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[key][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(key))); return;
   }
   const options = session.options;
   if (!options) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
@@ -385,7 +404,7 @@ async function handleCallback(env: Env, update: any) {
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
   } else if (data === "dispatch") { await dispatchBuild(env, query, session); return; }
   await setSession(env, userId, session);
-  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId) && session.workflow === "623") });
+  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(session.workflow || "")) });
 }
 
 async function handleJoinRequest(env: Env, update: any) {
@@ -458,7 +477,10 @@ function unwrapArtifact(bytes: Uint8Array, pattern: RegExp): { name: string; byt
 
 function ak3DeliveryFilename(workflowFile: string, artifactName: string, inputs: any): string {
   const serial = String(inputs.device_serial || "unknown").replace(/[^A-Za-z0-9._:-]/g, "_");
-  const target = workflowFile === "fastbuild_6.12.23_oneplus_15.yml" ? "OP15_6.12.23"
+  const target = workflowFile.includes("oneplus_15t_hmbird_gold") ? "OP15T_6.12.38_GoldHmbird"
+    : workflowFile.includes("oneplus_15t_hmbird_purple") ? "OP15T_6.12.38_PurpleHmbird"
+      : workflowFile.includes("oneplus_15_hmbird_gold") ? "OP15_6.12.23_GoldHmbird"
+        : workflowFile.includes("oneplus_15_hmbird_purple") ? "OP15_6.12.23_PurpleHmbird"
     : workflowFile.includes("oneplus_15t") ? "OP15T_6.12.38"
       : workflowFile.includes("6.12.38") ? "Ace6T_6.12.38" : "6.12.58";
   const ksu = artifactName.match(/_(ReSukiSU|SukiSU|KSUNext|KSU)(?:_(\d+))?_/i);

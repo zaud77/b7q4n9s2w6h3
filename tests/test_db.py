@@ -1,5 +1,13 @@
 from kernel_build_bot.db import Database
-from kernel_build_bot.bot import KernelBuildBot, defaults, parse_whitelist
+from kernel_build_bot.bot import (
+    KernelBuildBot,
+    apply_workflow_defaults,
+    defaults,
+    normalize_workflow_key,
+    parse_whitelist,
+    supports_self_config,
+    WORKFLOWS,
+)
 
 
 def test_serial_owner_and_revoke(tmp_path):
@@ -47,6 +55,27 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
     db.record_build(42, "3B15A800Y5D00000", "build.yml", "{}")
     assert db.count_builds(42, 0, 4_102_444_800) == 1
     assert db.count_builds(43, 0, 4_102_444_800) == 0
+
+
+def test_workflow_menu_and_oneplus15t_defaults():
+    assert list(WORKFLOWS) == ["623g", "623p", "638tg", "638tp", "638a", "658"]
+    assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
+    assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
+
+    options = apply_workflow_defaults("638tg", defaults())
+    assert options["lz4_enable"] == "false"
+    assert options["unicode_enable"] == "false"
+    assert supports_self_config("623g")
+    assert supports_self_config("623p")
+    assert not supports_self_config("638tg")
+    assert not supports_self_config("638tp")
+
+
+def test_legacy_workflow_bindings_are_normalized():
+    assert normalize_workflow_key("623") == "623g"
+    assert normalize_workflow_key("638t") == "638tp"
+    assert normalize_workflow_key("638a") == "638a"
+    assert normalize_workflow_key(None) is None
 
 
 def test_pending_build_job_survives_database_reopen(tmp_path):

@@ -14,8 +14,8 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 - 每个 TG 账号按北京时间自然日最多成功提交 2 次构建，失败的 GitHub 触发不计次数。
 - 提交后不向普通用户显示 GitHub 仓库、Actions 地址、构建配置或交付说明；机器人持久化跟踪对应运行，成功后只私聊发送请求的 ZIP 文件，机器人重启后继续跟踪。所有者仍可查看维护信息。
 - `/allow` 和白名单文件只登记序列号，不要求 Telegram ID；用户首次通过入频道验证时自动绑定其 Telegram 账号，防止之后被他人借用。
-- 菜单支持 6.12.23、6.12.38 Ace6T、6.12.38 OnePlus 15T、6.12.58。
-- 支持 KernelSU 分支、SUSFS、NoMount、KPM、LZ4/Zstd、LZ4KD、zarm、Unicode、BBR/Brutal、Droidspaces、网络增强、ADIOS、Re-Kernel和基带保护；自用配置仅所有者可见、可启用。
+- 菜单按机型排序：6.12.23 一加 15 金标/紫标风驰、6.12.38 一加 15T 金标/紫标风驰、6.12.38 Ace6T、6.12.58。
+- 支持 KernelSU 分支、SUSFS、NoMount、KPM、LZ4/Zstd、LZ4KD、zarm、Unicode、BBR/Brutal、Droidspaces、网络增强、ADIOS、Re-Kernel和基带保护；自用配置仅 6.12.23 一加 15 入口可用，且仅所有者可见。
 - SUSFS/NoMount 自动互斥，zarm 强制依赖 LZ4KD；触发前再次检查频道和数据库。
 - 只有 `ADMIN_USER_IDS` 中的所有者可使用管理员命令：`/allow 序列号`、`/revoke 序列号`、`/allowed`、`/joinlink`。
 - `/allowed` 会分多条消息显示完整白名单，不再只显示尾号或截断前 100 条。
