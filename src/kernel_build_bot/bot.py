@@ -47,8 +47,10 @@ SCRIPTS = {
             "purple": ("紫标", "638tp"),
         },
     ),
+    "623m": ("6.12.23 · 天玑", None),
     "638a": ("6.12.38 · OnePlus Ace6T", None),
     "658": ("6.12.58", None),
+    "658m": ("6.12.58 · 天玑", None),
 }
 WORKFLOWS = {
     "623g": ("6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
@@ -57,6 +59,8 @@ WORKFLOWS = {
     "638tp": ("6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"),
     "638a": ("6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"),
     "658": ("6.12.58", "fastbuild_6.12.58.yml"),
+    "623m": ("6.12.23 · 天玑", "fastbuild_6.12.23_mtk.yml"),
+    "658m": ("6.12.58 · 天玑", "fastbuild_6.12.58_mtk.yml"),
 }
 WORKFLOW_SCRIPTS = {
     workflow_key: script_key

@@ -59,11 +59,13 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
 
 
 def test_workflow_menu_and_oneplus15t_defaults():
-    assert list(SCRIPTS) == ["623", "638t", "638a", "658"]
+    assert list(SCRIPTS) == ["623", "638t", "623m", "638a", "658", "658m"]
     assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标", "紫标"]
     assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标", "紫标"]
     assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
     assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
+    assert WORKFLOWS["623m"][1] == "fastbuild_6.12.23_mtk.yml"
+    assert WORKFLOWS["658m"][1] == "fastbuild_6.12.58_mtk.yml"
 
     options = apply_workflow_defaults("638tg", defaults())
     assert options["lz4_enable"] == "false"
@@ -80,6 +82,8 @@ def test_legacy_workflow_bindings_are_normalized():
     assert normalize_workflow_key("638t") == "638t"
     assert normalize_workflow_key("638tg") == "638t"
     assert normalize_workflow_key("638a") == "638a"
+    assert normalize_workflow_key("623m") == "623m"
+    assert normalize_workflow_key("658m") == "658m"
     assert normalize_workflow_key(None) is None
 
 
