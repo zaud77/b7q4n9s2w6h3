@@ -36,25 +36,25 @@ SCRIPTS = {
     "623": (
         "6.12.23 · OnePlus 15",
         {
-            "gold": ("金标风驰", "623g"),
-            "purple": ("紫标风驰", "623p"),
+            "gold": ("金标", "623g"),
+            "purple": ("紫标", "623p"),
         },
     ),
     "638t": (
         "6.12.38 · OnePlus 15T",
         {
-            "gold": ("金标风驰", "638tg"),
-            "purple": ("紫标风驰", "638tp"),
+            "gold": ("金标", "638tg"),
+            "purple": ("紫标", "638tp"),
         },
     ),
     "638a": ("6.12.38 · OnePlus Ace6T", None),
     "658": ("6.12.58", None),
 }
 WORKFLOWS = {
-    "623g": ("6.12.23 · OnePlus 15 · 金标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
-    "623p": ("6.12.23 · OnePlus 15 · 紫标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
-    "638tg": ("6.12.38 · OnePlus 15T · 金标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"),
-    "638tp": ("6.12.38 · OnePlus 15T · 紫标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"),
+    "623g": ("6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
+    "623p": ("6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
+    "638tg": ("6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"),
+    "638tp": ("6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"),
     "638a": ("6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"),
     "658": ("6.12.58", "fastbuild_6.12.58.yml"),
 }
@@ -197,15 +197,107 @@ class KernelBuildBot:
             ChatMemberStatus.OWNER,
         }
 
+    async def create_join_request_invite(self, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+        invite = await context.bot.create_chat_invite_link(
+            self.settings.required_channel_id,
+            name=f"verified-{user_id}-{int(time.time())}",
+            creates_join_request=True,
+        )
+        return invite.invite_link
+
+    async def sync_user_commands(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, bound: bool) -> None:
+        if self.is_admin(user_id):
+            commands = [
+                BotCommand("start", "启动机器人"),
+                BotCommand("build", "构建绑定设备的内核"),
+                BotCommand("buildfor", "为指定白名单序列号构建"),
+                BotCommand("allow", "添加白名单序列号"),
+                BotCommand("revoke", "撤销白名单序列号"),
+                BotCommand("allowed", "查看完整白名单"),
+                BotCommand("joinlink", "获取入群验证链接"),
+            ]
+        elif bound:
+            commands = [
+                BotCommand("start", "启动机器人"),
+                BotCommand("build", "构建绑定设备的内核"),
+            ]
+        else:
+            commands = [BotCommand("start", "验证序列号")]
+        try:
+            await context.bot.set_my_commands(
+                commands,
+                scope=BotCommandScopeChat(chat_id=user_id),
+            )
+        except Exception:
+            logging.exception("failed to set commands for user %s", user_id)
+
+    async def recover_join_approval(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        update: Update,
+        user_id: int,
+    ) -> None:
+        if await self.is_channel_member(context, user_id):
+            self.db.clear_pending_join(user_id)
+            context.user_data.clear()
+            await update.effective_message.reply_text("你已经是频道成员，序列号已绑定，可直接使用 /build。")
+            return
+        try:
+            invite_link = await self.create_join_request_invite(context, user_id)
+        except Exception:
+            logging.exception("failed to create recovery channel invite link")
+            await update.effective_message.reply_text(
+                "序列号已通过，但批准入群失败，请联系管理员。"
+            )
+            return
+        await update.effective_message.reply_text(
+            f"原加入申请已失效。请使用以下链接重新提交加入申请，机器人会自动批准：\n{invite_link}"
+        )
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
             return
-        await update.effective_message.reply_text(
-            "OnePlus GKI 构建机器人已部署并启动；发送 /build 可选择内核版本和功能。"
-        )
+        user = update.effective_user
+        bound_serial = self.db.serial_for_user(user.id)
+        if self.is_admin(user.id):
+            await self.sync_user_commands(context, user.id, True)
+            await update.effective_message.reply_text(
+                "OnePlus GKI 构建机器人已启动；发送 /build 可选择内核版本和功能。"
+            )
+            return
+        if await self.is_channel_member(context, user.id):
+            if bound_serial:
+                context.user_data.clear()
+                await self.sync_user_commands(context, user.id, True)
+                await update.effective_message.reply_text(
+                    "OnePlus GKI 构建机器人已启动；发送 /build 可选择内核版本和功能。"
+                )
+            else:
+                context.user_data.clear()
+                context.user_data["awaiting_join_serial"] = True
+                await self.sync_user_commands(context, user.id, False)
+                await update.effective_message.reply_text("你已是群组成员。请输入设备序列号完成绑定：")
+            return
+        if bound_serial:
+            context.user_data.clear()
+            await self.sync_user_commands(context, user.id, True)
+            invite_link = await self.create_join_request_invite(context, user.id)
+            await update.effective_message.reply_text(
+                f"序列号已绑定。请使用以下链接申请进入群组，机器人会自动批准：\n{invite_link}"
+            )
+        else:
+            context.user_data.clear()
+            context.user_data["awaiting_join_serial"] = True
+            await self.sync_user_commands(context, user.id, False)
+            await update.effective_message.reply_text("请输入设备序列号，验证通过后才能进入群组：")
 
     async def join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
+            return
+        user = update.effective_user
+        if not self.is_admin(user.id) and not self.db.serial_for_user(user.id):
+            await self.sync_user_commands(context, user.id, False)
+            await update.effective_message.reply_text("请先使用 /start 绑定设备序列号。")
             return
         context.user_data.clear()
         context.user_data["awaiting_join_serial"] = True
@@ -229,12 +321,16 @@ class KernelBuildBot:
         if await self.reject_while_building(update):
             return
         user = update.effective_user
+        if not self.is_admin(user.id) and not self.db.serial_for_user(user.id):
+            await self.sync_user_commands(context, user.id, False)
+            await update.effective_message.reply_text("请先使用 /start 绑定设备序列号。")
+            return
         if not await self.is_channel_member(context, user.id):
-            await update.effective_message.reply_text("尚未通过入频道验证，请先使用 /join。")
+            await update.effective_message.reply_text("尚未通过入群验证，请先使用 /start。")
             return
         serial = self.db.serial_for_user(user.id)
         if not serial:
-            await update.effective_message.reply_text("当前 Telegram 账号尚未绑定有效序列号，请先使用 /join。")
+            await update.effective_message.reply_text("当前 Telegram 账号尚未绑定有效序列号，请先使用 /start。")
             return
         if (
             not self.is_admin(user.id)
@@ -322,31 +418,38 @@ class KernelBuildBot:
             await update.effective_message.reply_text("序列号格式无效，请重新输入。")
             return
         user_id = update.effective_user.id
+        pending = self.db.get_pending_join(user_id)
+        if not self.db.claim_serial(serial, user_id):
+            if pending:
+                try:
+                    await context.bot.decline_chat_join_request(
+                        self.settings.required_channel_id, user_id
+                    )
+                except Exception:
+                    logging.exception("failed to decline channel join request")
+                self.db.clear_pending_join(user_id)
+            context.user_data.clear()
+            await self.sync_user_commands(context, user_id, False)
+            await update.effective_message.reply_text(
+                "序列号验证未通过，已拒绝本次入群申请。请使用 /start 重新验证。"
+            )
+            return
+        await self.sync_user_commands(context, user_id, True)
         if context.user_data.get("awaiting_join_serial"):
             if await self.is_channel_member(context, user_id):
-                if not self.db.claim_serial(serial, user_id):
-                    await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
-                    return
                 context.user_data.clear()
                 await update.effective_message.reply_text("序列号已绑定，频道成员身份验证通过，可使用 /build。")
                 return
-            pending = self.db.get_pending_join(user_id)
             if not pending:
-                if not self.db.verify_serial(serial, user_id):
-                    await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
-                    return
                 await update.effective_message.reply_text(
                     "序列号验证通过。请先打开管理员发送的频道申请链接并提交加入请求，机器人收到后会自动验证。"
                 )
-                return
-            if not self.db.claim_serial(serial, user_id):
-                await update.effective_message.reply_text("序列号不在白名单中，或已绑定其他 Telegram 用户。")
                 return
             try:
                 await context.bot.approve_chat_join_request(self.settings.required_channel_id, user_id)
             except Exception:
                 logging.exception("failed to approve channel join request")
-                await update.effective_message.reply_text("序列号已通过，但批准入群失败，请联系管理员。")
+                await self.recover_join_approval(context, update, user_id)
                 return
             self.db.clear_pending_join(user_id)
             context.user_data.clear()
@@ -375,6 +478,10 @@ class KernelBuildBot:
         if await self.reject_while_building(update):
             return
         await query.answer()
+        if not self.is_admin(query.from_user.id) and not self.db.serial_for_user(query.from_user.id):
+            await self.sync_user_commands(context, query.from_user.id, False)
+            await query.edit_message_text("请先使用 /start 绑定设备序列号。")
+            return
         data = query.data
         if data == "cancel":
             context.user_data.clear()
@@ -590,12 +697,10 @@ class KernelBuildBot:
         }
 
     async def post_init(self, application: Application) -> None:
-        public_commands = [
+        public_commands = [BotCommand("start", "验证序列号")]
+        owner_commands = [
             BotCommand("start", "启动机器人"),
-            BotCommand("join", "验证序列号并申请加入频道"),
             BotCommand("build", "构建绑定设备的内核"),
-        ]
-        owner_commands = public_commands + [
             BotCommand("buildfor", "为指定白名单序列号构建"),
             BotCommand("allow", "添加白名单序列号"),
             BotCommand("revoke", "撤销白名单序列号"),
@@ -891,7 +996,7 @@ class KernelBuildBot:
     async def unknown_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
             return
-        await update.effective_message.reply_text("未知命令。请使用 /start、/join 或 /build。")
+        await update.effective_message.reply_text("未知命令。请使用 /start。")
 
     def application(self) -> Application:
         app = (

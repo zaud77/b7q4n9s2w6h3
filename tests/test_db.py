@@ -60,8 +60,8 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
 
 def test_workflow_menu_and_oneplus15t_defaults():
     assert list(SCRIPTS) == ["623", "638t", "638a", "658"]
-    assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标风驰", "紫标风驰"]
-    assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标风驰", "紫标风驰"]
+    assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标", "紫标"]
+    assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标", "紫标"]
     assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
     assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
 

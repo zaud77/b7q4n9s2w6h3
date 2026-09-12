@@ -30,21 +30,21 @@ type Session = {
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
   "623": ["6.12.23 · OnePlus 15", {
-    gold: ["金标风驰", "623g"],
-    purple: ["紫标风驰", "623p"],
+    gold: ["金标", "623g"],
+    purple: ["紫标", "623p"],
   }],
   "638t": ["6.12.38 · OnePlus 15T", {
-    gold: ["金标风驰", "638tg"],
-    purple: ["紫标风驰", "638tp"],
+    gold: ["金标", "638tg"],
+    purple: ["紫标", "638tp"],
   }],
   "638a": ["6.12.38 · OnePlus Ace6T", null],
   "658": ["6.12.58", null],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
-  "623g": ["6.12.23 · OnePlus 15 · 金标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
-  "623p": ["6.12.23 · OnePlus 15 · 紫标风驰", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
-  "638tg": ["6.12.38 · OnePlus 15T · 金标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"],
-  "638tp": ["6.12.38 · OnePlus 15T · 紫标风驰", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
+  "623g": ["6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
+  "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
+  "638tg": ["6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"],
+  "638tp": ["6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
   "638a": ["6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"],
   "658": ["6.12.58", "fastbuild_6.12.58.yml"],
 };
@@ -131,6 +131,30 @@ async function answerCallback(env: Env, id: string, text?: string, showAlert = f
   return tg(env, "answerCallbackQuery", { callback_query_id: id, ...(text ? { text, show_alert: showAlert } : {}) });
 }
 
+async function setUserCommands(env: Env, userId: number, bound: boolean) {
+  const commands = isAdmin(env, userId)
+    ? [
+      { command: "start", description: "启动机器人" },
+      { command: "build", description: "构建绑定设备的内核" },
+      { command: "buildfor", description: "为指定白名单序列号构建" },
+      { command: "allow", description: "添加白名单序列号" },
+      { command: "revoke", description: "撤销白名单序列号" },
+      { command: "allowed", description: "查看完整白名单" },
+      { command: "joinlink", description: "获取入群验证链接" },
+    ]
+    : bound
+      ? [
+        { command: "start", description: "启动机器人" },
+        { command: "build", description: "构建绑定设备的内核" },
+      ]
+      : [{ command: "start", description: "验证序列号" }];
+  try {
+    await tg(env, "setMyCommands", { commands, scope: { type: "chat", chat_id: userId } });
+  } catch (error) {
+    console.error("set user commands failed", userId, String(error));
+  }
+}
+
 async function getSession(env: Env, userId: number): Promise<Session> {
   const row: any = await env.DB.prepare("SELECT data FROM sessions WHERE telegram_user_id=?").bind(userId).first();
   if (!row) return {};
@@ -152,6 +176,45 @@ async function isMember(env: Env, userId: number): Promise<boolean> {
     const member = await tg(env, "getChatMember", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId });
     return ["member", "administrator", "creator"].includes(member.status);
   } catch { return false; }
+}
+
+async function createJoinRequestInvite(env: Env, userId: number): Promise<string> {
+  const invite = await tg(env, "createChatInviteLink", {
+    chat_id: env.REQUIRED_CHANNEL_ID,
+    name: `verified-${userId}-${now()}`,
+    creates_join_request: true,
+  });
+  return invite.invite_link;
+}
+
+async function recoverJoinApproval(
+  env: Env,
+  userId: number,
+  messageChatId: number | string,
+  error: unknown
+): Promise<void> {
+  console.error("approve join request failed", userId, String(error));
+  if (await isMember(env, userId)) {
+    await env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(userId).run();
+    await clearSession(env, userId);
+    await sendMessage(env, messageChatId, "你已经是频道成员，序列号已绑定，可直接使用 /build。");
+    return;
+  }
+  try {
+    const inviteLink = await createJoinRequestInvite(env, userId);
+    await sendMessage(
+      env,
+      messageChatId,
+      `原加入申请已失效。请使用以下链接重新提交加入申请，机器人会自动批准：\n${inviteLink}`
+    );
+  } catch (inviteError) {
+    console.error("create recovery join invite failed", userId, String(inviteError));
+    await sendMessage(
+      env,
+      messageChatId,
+      "序列号已通过，但批准入群失败，请联系管理员。"
+    );
+  }
 }
 
 async function serialRecord(env: Env, serial: string): Promise<any | null> {
@@ -249,23 +312,50 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
   const userId = message.from.id;
   const chatId = message.chat.id;
   if (await rejectWhileBuilding(env, update)) return;
+  const boundSerial = await serialForUser(env, userId);
+  if (command !== "start" && !isAdmin(env, userId) && !boundSerial) {
+    await setUserCommands(env, userId, false);
+    await sendMessage(env, chatId, "请先使用 /start 绑定设备序列号。");
+    return;
+  }
   if (command === "start") {
-    if ((args[0] || "").toLowerCase() === "join") {
-      await setSession(env, userId, { awaitingJoinSerial: true });
-      await sendMessage(env, chatId, "请输入设备序列号：");
+    if (isAdmin(env, userId)) {
+      await setUserCommands(env, userId, true);
+      await sendMessage(env, chatId, "OnePlus GKI 构建机器人已启动；发送 /build 可选择内核版本和功能。");
       return;
     }
-    await sendMessage(env, chatId, "OnePlus GKI 构建机器人已部署并启动；发送 /build 可选择内核版本和功能。");
-    return;
+    if (await isMember(env, userId)) {
+      if (boundSerial) {
+        await clearSession(env, userId);
+        await setUserCommands(env, userId, true);
+        await sendMessage(env, chatId, "OnePlus GKI 构建机器人已启动；发送 /build 可选择内核版本和功能。");
+      } else {
+        await setSession(env, userId, { awaitingJoinSerial: true });
+        await setUserCommands(env, userId, false);
+        await sendMessage(env, chatId, "你已是群组成员。请输入设备序列号完成绑定：");
+      }
+      return;
+    }
+    if (boundSerial) {
+      await clearSession(env, userId);
+      await setUserCommands(env, userId, true);
+      const inviteLink = await createJoinRequestInvite(env, userId);
+      await sendMessage(env, chatId, `序列号已绑定。请使用以下链接申请进入群组，机器人会自动批准：\n${inviteLink}`);
+    } else {
+      await setSession(env, userId, { awaitingJoinSerial: true });
+      await setUserCommands(env, userId, false);
+      await sendMessage(env, chatId, "请输入设备序列号，验证通过后才能进入群组：");
+      return;
+    }
   }
   if (command === "join") {
     await setSession(env, userId, { awaitingJoinSerial: true });
     await sendMessage(env, chatId, "请输入设备序列号："); return;
   }
   if (command === "build") {
-    if (!(await isMember(env, userId))) { await sendMessage(env, chatId, "尚未通过入频道验证，请先使用 /join。"); return; }
+    if (!(await isMember(env, userId))) { await sendMessage(env, chatId, "尚未通过入群验证，请先使用 /start。"); return; }
     const serial = await serialForUser(env, userId);
-    if (!serial) { await sendMessage(env, chatId, "当前 Telegram 账号尚未绑定有效序列号，请先使用 /join。"); return; }
+    if (!serial) { await sendMessage(env, chatId, "当前 Telegram 账号尚未绑定有效序列号，请先使用 /start。"); return; }
     const bound = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
     const options = defaults();
     const session: Session = { serial, options };
@@ -328,7 +418,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
     await sendMessage(env, chatId, `这是频道验证入口，用户不能直接进入；打开机器人并按提示验证序列号：\n${env.REQUIRED_CHANNEL_URL}?start=join`); return;
   }
-  await sendMessage(env, chatId, "不支持该命令。可使用 /start、/join、/build。");
+  await sendMessage(env, chatId, "不支持该命令。请使用 /start。");
 }
 
 async function handleText(env: Env, update: any) {
@@ -337,26 +427,33 @@ async function handleText(env: Env, update: any) {
   const session = await getSession(env, userId);
   if (!session.awaitingJoinSerial) return;
   if (!SERIAL_RE.test(serial)) { await sendMessage(env, message.chat.id, "序列号格式无效，请重新输入。"); return; }
-  if (!(await claimSerial(env, serial, userId))) { await sendMessage(env, message.chat.id, "序列号不在白名单中，或已绑定其他 Telegram 用户。"); return; }
   const pending: any = await env.DB.prepare("SELECT user_chat_id FROM pending_joins WHERE telegram_user_id=?").bind(userId).first();
+  if (!(await claimSerial(env, serial, userId))) {
+    if (pending) {
+      try { await tg(env, "declineChatJoinRequest", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId }); }
+      catch (error) { console.error("decline join request failed", userId, String(error)); }
+      await env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(userId).run();
+    }
+    await clearSession(env, userId);
+    await setUserCommands(env, userId, false);
+    await sendMessage(env, message.chat.id, "序列号验证未通过，已拒绝本次入群申请。请使用 /start 重新验证。");
+    return;
+  }
+  await setUserCommands(env, userId, true);
   if (pending) {
     try {
       await tg(env, "approveChatJoinRequest", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId });
       await env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(userId).run();
       await clearSession(env, userId);
       await sendMessage(env, pending.user_chat_id, "序列号验证通过，已批准进入频道。加入后可使用 /build。");
-    } catch { await sendMessage(env, message.chat.id, "序列号已通过，但批准入群失败，请联系管理员。"); }
+    } catch (error) { await recoverJoinApproval(env, userId, message.chat.id, error); }
     return;
   }
   await clearSession(env, userId);
   if (await isMember(env, userId)) await sendMessage(env, message.chat.id, "序列号已绑定，频道成员身份验证通过，可使用 /build。");
   else {
-    const invite = await tg(env, "createChatInviteLink", {
-      chat_id: env.REQUIRED_CHANNEL_ID,
-      name: `verified-${userId}-${now()}`,
-      creates_join_request: true,
-    });
-    await sendMessage(env, message.chat.id, `序列号验证通过。请使用以下链接提交频道加入申请，机器人会自动批准：\n${invite.invite_link}`);
+    const inviteLink = await createJoinRequestInvite(env, userId);
+    await sendMessage(env, message.chat.id, `序列号验证通过。请使用以下链接提交频道加入申请，机器人会自动批准：\n${inviteLink}`);
   }
 }
 
@@ -412,6 +509,11 @@ async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   if (await rejectWhileBuilding(env, update)) return;
   await answerCallback(env, query.id);
+  if (!(await serialForUser(env, userId)) && !isAdmin(env, userId)) {
+    await setUserCommands(env, userId, false);
+    await editMessage(env, chatId, messageId, "请先使用 /start 绑定设备序列号。");
+    return;
+  }
   const data = query.data || ""; const session = await getSession(env, userId);
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
   if (data.startsWith("kernel:")) {
@@ -465,11 +567,15 @@ async function handleJoinRequest(env: Env, update: any) {
   const request = update.chat_join_request; if (String(request.chat.id) !== String(env.REQUIRED_CHANNEL_ID)) return;
   const boundSerial = await serialForUser(env, request.from.id);
   if (boundSerial && await serialRecord(env, boundSerial)) {
-    await tg(env, "approveChatJoinRequest", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: request.from.id });
-    await env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(request.from.id).run();
-    await clearSession(env, request.from.id);
-    await sendMessage(env, request.user_chat_id, "序列号验证通过，已批准进入频道。加入后可使用 /build。");
-    return;
+    try {
+      await tg(env, "approveChatJoinRequest", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: request.from.id });
+      await env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(request.from.id).run();
+      await clearSession(env, request.from.id);
+      await sendMessage(env, request.user_chat_id, "序列号验证通过，已批准进入频道。加入后可使用 /build。");
+      return;
+    } catch (error) {
+      console.error("approve immediate join request failed", request.from.id, String(error));
+    }
   }
   await env.DB.prepare(
     "INSERT INTO pending_joins(telegram_user_id,user_chat_id,requested_at) VALUES(?,?,?) ON CONFLICT(telegram_user_id) DO UPDATE SET user_chat_id=excluded.user_chat_id,requested_at=excluded.requested_at"
@@ -596,6 +702,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, service: "oneplus-gki-build-bot" });
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
+      await tg(env, "setMyCommands", { commands: [{ command: "start", description: "验证序列号" }] });
       await tg(env, "setWebhook", {
         url: webhookUrl,
         secret_token: env.WEBHOOK_SECRET,
