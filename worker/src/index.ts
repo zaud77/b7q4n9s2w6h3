@@ -147,7 +147,10 @@ async function setUserCommands(env: Env, userId: number, bound: boolean) {
         { command: "start", description: "启动机器人" },
         { command: "build", description: "构建绑定设备的内核" },
       ]
-      : [{ command: "start", description: "验证序列号" }];
+      : [
+        { command: "start", description: "验证序列号" },
+        { command: "join", description: "验证序列号并申请入群" },
+      ];
   try {
     await tg(env, "setMyCommands", { commands, scope: { type: "chat", chat_id: userId } });
   } catch (error) {
@@ -313,7 +316,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
   const chatId = message.chat.id;
   if (await rejectWhileBuilding(env, update)) return;
   const boundSerial = await serialForUser(env, userId);
-  if (command !== "start" && !isAdmin(env, userId) && !boundSerial) {
+  if (command !== "start" && command !== "join" && !isAdmin(env, userId) && !boundSerial) {
     await setUserCommands(env, userId, false);
     await sendMessage(env, chatId, "请先使用 /start 绑定设备序列号。");
     return;
@@ -673,6 +676,10 @@ async function processJob(env: Env, job: any) {
   }
   if (run.status !== "completed") return;
   if (run.conclusion !== "success") { await sendMessage(env, job.chat_id, "本次构建失败，请联系管理员。"); await finishJob(env, job.request_id, "failed", runId); return; }
+  const claimed = await env.DB.prepare(
+    "UPDATE build_jobs SET status='delivering',updated_at=? WHERE request_id=? AND (status IN ('running','delivery_pending') OR (status='delivering' AND updated_at<=?))"
+  ).bind(now(), job.request_id, now() - 300).run();
+  if (!Number(claimed.meta.changes || 0)) return;
   const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers: ghHeaders(env) });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
   let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
@@ -692,8 +699,14 @@ async function finishJob(env: Env, requestId: string, status: string, runId?: nu
     .bind(status, runId || null, now(), requestId).run();
 }
 async function monitorBuilds(env: Env) {
-  const result: any = await env.DB.prepare("SELECT * FROM build_jobs WHERE status IN ('submitted','running','delivery_pending') ORDER BY created_at LIMIT 10").all();
-  for (const job of result.results) { try { await processJob(env, job); } catch (e) { console.error("monitor", job.request_id, e); } }
+  const result: any = await env.DB.prepare("SELECT * FROM build_jobs WHERE status IN ('submitted','running','delivery_pending','delivering') ORDER BY created_at LIMIT 10").all();
+  for (const job of result.results) {
+    try { await processJob(env, job); }
+    catch (e) {
+      console.error("monitor", job.request_id, e);
+      await env.DB.prepare("UPDATE build_jobs SET status='delivery_pending',updated_at=? WHERE request_id=? AND status='delivering'").bind(now(), job.request_id).run();
+    }
+  }
 }
 
 export default {
@@ -702,7 +715,12 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, service: "oneplus-gki-build-bot" });
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
-      await tg(env, "setMyCommands", { commands: [{ command: "start", description: "验证序列号" }] });
+      await tg(env, "setMyCommands", {
+        commands: [
+          { command: "start", description: "验证序列号" },
+          { command: "join", description: "验证序列号并申请入群" },
+        ],
+      });
       await tg(env, "setWebhook", {
         url: webhookUrl,
         secret_token: env.WEBHOOK_SECRET,

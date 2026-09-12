@@ -222,7 +222,10 @@ class KernelBuildBot:
                 BotCommand("build", "构建绑定设备的内核"),
             ]
         else:
-            commands = [BotCommand("start", "验证序列号")]
+            commands = [
+                BotCommand("start", "验证序列号"),
+                BotCommand("join", "验证序列号并申请入群"),
+            ]
         try:
             await context.bot.set_my_commands(
                 commands,
@@ -293,11 +296,6 @@ class KernelBuildBot:
 
     async def join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
-            return
-        user = update.effective_user
-        if not self.is_admin(user.id) and not self.db.serial_for_user(user.id):
-            await self.sync_user_commands(context, user.id, False)
-            await update.effective_message.reply_text("请先使用 /start 绑定设备序列号。")
             return
         context.user_data.clear()
         context.user_data["awaiting_join_serial"] = True
@@ -697,7 +695,10 @@ class KernelBuildBot:
         }
 
     async def post_init(self, application: Application) -> None:
-        public_commands = [BotCommand("start", "验证序列号")]
+        public_commands = [
+            BotCommand("start", "验证序列号"),
+            BotCommand("join", "验证序列号并申请入群"),
+        ]
         owner_commands = [
             BotCommand("start", "启动机器人"),
             BotCommand("build", "构建绑定设备的内核"),
