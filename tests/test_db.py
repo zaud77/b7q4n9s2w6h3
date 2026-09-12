@@ -64,8 +64,14 @@ def test_workflow_menu_and_oneplus15t_defaults():
     assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标", "紫标"]
     assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
     assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
-    assert WORKFLOWS["623m"][1] == "fastbuild_6.12.23_mtk.yml"
-    assert WORKFLOWS["658m"][1] == "fastbuild_6.12.58_mtk.yml"
+    assert WORKFLOWS["623mg"][1] == "fastbuild_6.12.23_mtk_hmbird_gold.yml"
+    assert WORKFLOWS["623mp"][1] == "fastbuild_6.12.23_mtk_hmbird_purple.yml"
+    assert WORKFLOWS["638ag"][1] == "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"
+    assert WORKFLOWS["638ap"][1] == "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"
+    assert WORKFLOWS["658g"][1] == "fastbuild_6.12.58_hmbird_gold.yml"
+    assert WORKFLOWS["658p"][1] == "fastbuild_6.12.58_hmbird_purple.yml"
+    assert WORKFLOWS["658mg"][1] == "fastbuild_6.12.58_mtk_hmbird_gold.yml"
+    assert WORKFLOWS["658mp"][1] == "fastbuild_6.12.58_mtk_hmbird_purple.yml"
 
     options = apply_workflow_defaults("638tg", defaults())
     assert options["lz4_enable"] == "false"
@@ -82,8 +88,14 @@ def test_legacy_workflow_bindings_are_normalized():
     assert normalize_workflow_key("638t") == "638t"
     assert normalize_workflow_key("638tg") == "638t"
     assert normalize_workflow_key("638a") == "638a"
-    assert normalize_workflow_key("623m") == "623m"
-    assert normalize_workflow_key("658m") == "658m"
+    assert normalize_workflow_key("623mg") == "623m"
+    assert normalize_workflow_key("623mp") == "623m"
+    assert normalize_workflow_key("638ag") == "638a"
+    assert normalize_workflow_key("638ap") == "638a"
+    assert normalize_workflow_key("658g") == "658"
+    assert normalize_workflow_key("658p") == "658"
+    assert normalize_workflow_key("658mg") == "658m"
+    assert normalize_workflow_key("658mp") == "658m"
     assert normalize_workflow_key(None) is None
 
 

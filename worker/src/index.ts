@@ -37,20 +37,36 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
     gold: ["金标", "638tg"],
     purple: ["紫标", "638tp"],
   }],
-  "623m": ["6.12.23 · 天玑", null],
-  "638a": ["6.12.38 · OnePlus Ace6T", null],
-  "658": ["6.12.58", null],
-  "658m": ["6.12.58 · 天玑", null],
+  "623m": ["6.12.23 · 天玑", {
+    gold: ["金标", "623mg"],
+    purple: ["紫标", "623mp"],
+  }],
+  "638a": ["6.12.38 · OnePlus Ace6T", {
+    gold: ["金标", "638ag"],
+    purple: ["紫标", "638ap"],
+  }],
+  "658": ["6.12.58", {
+    gold: ["金标", "658g"],
+    purple: ["紫标", "658p"],
+  }],
+  "658m": ["6.12.58 · 天玑", {
+    gold: ["金标", "658mg"],
+    purple: ["紫标", "658mp"],
+  }],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
   "623g": ["6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
   "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
   "638tg": ["6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"],
   "638tp": ["6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
-  "638a": ["6.12.38 · OnePlus Ace6T", "fastbuild_6.12.38_oneplus_ace6t.yml"],
-  "658": ["6.12.58", "fastbuild_6.12.58.yml"],
-  "623m": ["6.12.23 · 天玑", "fastbuild_6.12.23_mtk.yml"],
-  "658m": ["6.12.58 · 天玑", "fastbuild_6.12.58_mtk.yml"],
+  "638ag": ["6.12.38 · OnePlus Ace6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"],
+  "638ap": ["6.12.38 · OnePlus Ace6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"],
+  "658g": ["6.12.58 · 金标", "fastbuild_6.12.58_hmbird_gold.yml"],
+  "658p": ["6.12.58 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"],
+  "623mg": ["6.12.23 · 天玑 · 金标", "fastbuild_6.12.23_mtk_hmbird_gold.yml"],
+  "623mp": ["6.12.23 · 天玑 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"],
+  "658mg": ["6.12.58 · 天玑 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"],
+  "658mp": ["6.12.58 · 天玑 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"],
 };
 const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
   Object.entries(SCRIPTS).flatMap(([scriptKey, value]) =>
