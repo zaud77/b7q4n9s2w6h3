@@ -29,6 +29,7 @@ type Session = {
 };
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
+const WORKFLOW_BINDING_EPOCH = 1789287000;
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
   "623": ["6.12.23 · OnePlus 15", {
     gold: ["金标", "623g"],
@@ -322,12 +323,15 @@ function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
 }
 
 async function workflowForUser(env: Env, userId: number): Promise<string | null> {
-  const row: any = await env.DB.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?").bind(userId).first();
+  const row: any = await env.DB.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=? AND bound_at>=?").bind(userId, WORKFLOW_BINDING_EPOCH).first();
   return normalizeWorkflowKey(row?.workflow_key);
 }
 async function bindWorkflow(env: Env, userId: number, key: string): Promise<string> {
-  await env.DB.prepare("INSERT OR IGNORE INTO workflow_bindings(telegram_user_id,workflow_key,bound_at) VALUES(?,?,?)")
-    .bind(userId, key, now()).run();
+  await env.DB.prepare(
+    "INSERT INTO workflow_bindings(telegram_user_id,workflow_key,bound_at) VALUES(?,?,?) " +
+    "ON CONFLICT(telegram_user_id) DO UPDATE SET workflow_key=excluded.workflow_key,bound_at=excluded.bound_at " +
+    "WHERE workflow_bindings.bound_at<?"
+  ).bind(userId, key, now(), WORKFLOW_BINDING_EPOCH).run();
   return (await workflowForUser(env, userId))!;
 }
 async function workflowMaintenance(env: Env, key: string): Promise<boolean> {

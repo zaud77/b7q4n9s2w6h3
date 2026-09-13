@@ -6,6 +6,8 @@ from pathlib import Path
 import sqlite3
 import time
 
+WORKFLOW_BINDING_EPOCH = 1789287000
+
 
 class Database:
     def __init__(self, path: str, pepper: str):
@@ -152,8 +154,8 @@ class Database:
     def workflow_for_user(self, user_id: int) -> str | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?",
-                (user_id,),
+                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=? AND bound_at>=?",
+                (user_id, WORKFLOW_BINDING_EPOCH),
             ).fetchone()
             return row["workflow_key"] if row else None
 
@@ -161,13 +163,17 @@ class Database:
         """Bind once and return the authoritative workflow key."""
         with self._connect() as db:
             db.execute(
-                """INSERT OR IGNORE INTO workflow_bindings(telegram_user_id, workflow_key, bound_at)
-                   VALUES (?, ?, ?)""",
-                (user_id, workflow_key, int(time.time())),
+                """INSERT INTO workflow_bindings(telegram_user_id, workflow_key, bound_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(telegram_user_id) DO UPDATE SET
+                     workflow_key=excluded.workflow_key,
+                     bound_at=excluded.bound_at
+                   WHERE workflow_bindings.bound_at<?""",
+                (user_id, workflow_key, int(time.time()), WORKFLOW_BINDING_EPOCH),
             )
             row = db.execute(
-                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?",
-                (user_id,),
+                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=? AND bound_at>=?",
+                (user_id, WORKFLOW_BINDING_EPOCH),
             ).fetchone()
             return row["workflow_key"]
 

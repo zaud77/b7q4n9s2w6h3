@@ -1,4 +1,4 @@
-from kernel_build_bot.db import Database
+from kernel_build_bot.db import Database, WORKFLOW_BINDING_EPOCH
 from kernel_build_bot.bot import (
     KernelBuildBot,
     SCRIPTS,
@@ -60,6 +60,18 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
     db.record_build(42, "3B15A800Y5D00000", "build.yml", "{}")
     assert db.count_builds(42, 0, 4_102_444_800) == 1
     assert db.count_builds(43, 0, 4_102_444_800) == 0
+
+
+def test_legacy_workflow_binding_requires_explicit_rebind(tmp_path):
+    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    with db._connect() as connection:
+        connection.execute(
+            "INSERT INTO workflow_bindings(telegram_user_id, workflow_key, bound_at) VALUES (?, ?, ?)",
+            (42, "623", WORKFLOW_BINDING_EPOCH - 1),
+        )
+    assert db.workflow_for_user(42) is None
+    assert db.bind_workflow(42, "658") == "658"
+    assert db.bind_workflow(42, "623") == "658"
 
 
 def test_workflow_menu_and_oneplus15t_defaults():
