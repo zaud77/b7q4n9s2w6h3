@@ -37,7 +37,9 @@ jobs:
         run: |
           for attempt in {1..10}; do
             response=$(curl --silent --show-error --fail https://gki.zaomin.dpdns.org/health) || true
-            if jq -e '.ok == true and .dataMigration == "migration:explicit-workflow-binding-v2"' <<<"$response"; then
+            if jq -e '.ok == true
+              and .dataMigration == "migration:explicit-workflow-binding-v2"
+              and .quotaMigration == "migration:successful-build-quota-v1"' <<<"$response"; then
               exit 0
             fi
             echo "Waiting for the new Worker version (attempt $attempt/10)"

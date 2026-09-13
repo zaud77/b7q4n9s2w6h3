@@ -30,6 +30,7 @@ type Session = {
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
+const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
   "623": ["6.12.23 · OnePlus 15", {
     gold: ["金标", "623g"],
@@ -164,6 +165,7 @@ async function setUserCommands(env: Env, userId: number, bound: boolean): Promis
       { command: "buildfor", description: "为指定白名单序列号构建" },
       { command: "allow", description: "添加白名单序列号" },
       { command: "revoke", description: "撤销白名单序列号" },
+      { command: "resetquota", description: "重置序列号构建次数" },
       { command: "allowed", description: "查看完整白名单" },
       { command: "joinlink", description: "获取入群验证链接" },
     ]
@@ -372,6 +374,57 @@ async function applyDataMigrations(env: Env): Promise<string> {
   return remaining.length ? `${DATA_MIGRATION_KEY}:telegram-cleanup-pending` : DATA_MIGRATION_KEY;
 }
 
+async function applyQuotaMigration(env: Env): Promise<string> {
+  const marker: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?").bind(QUOTA_MIGRATION_KEY).first();
+  if (marker?.value === "done") return QUOTA_MIGRATION_KEY;
+
+  const columns: any = await env.DB.prepare("PRAGMA table_info(build_jobs)").all();
+  const hasSucceededAt = (columns.results || []).some((column: any) => column.name === "succeeded_at");
+  if (!hasSucceededAt) {
+    try {
+      await env.DB.prepare("ALTER TABLE build_jobs ADD COLUMN succeeded_at INTEGER").run();
+    } catch (error) {
+      const retry: any = await env.DB.prepare("PRAGMA table_info(build_jobs)").all();
+      if (!(retry.results || []).some((column: any) => column.name === "succeeded_at")) throw error;
+    }
+  }
+
+  await env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS quota_resets (telegram_user_id INTEGER PRIMARY KEY, reset_at INTEGER NOT NULL)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_build_jobs_quota ON build_jobs(telegram_user_id, created_at, succeeded_at)"),
+    env.DB.prepare("UPDATE build_jobs SET succeeded_at=updated_at WHERE succeeded_at IS NULL AND status IN ('delivering','delivery_pending','sent')"),
+    env.DB.prepare(
+      "INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value='done'"
+    ).bind(QUOTA_MIGRATION_KEY),
+  ]);
+  return QUOTA_MIGRATION_KEY;
+}
+
+function beijingDayBounds(timestamp: number): [number, number] {
+  const shifted = timestamp + 8 * 3600;
+  const start = Math.floor(shifted / 86400) * 86400 - 8 * 3600;
+  return [start, start + 86400];
+}
+
+async function quotaStartForUser(env: Env, userId: number, dayStart: number): Promise<number> {
+  const reset: any = await env.DB.prepare("SELECT reset_at FROM quota_resets WHERE telegram_user_id=?").bind(userId).first();
+  return Math.max(dayStart, reset?.reset_at == null ? dayStart : Number(reset.reset_at) + 1);
+}
+
+async function resetSerialQuota(env: Env, serial: string): Promise<number | null> {
+  const hash = await digestSerial(env, serial);
+  const row: any = await env.DB.prepare(
+    "SELECT owner_user_id FROM serial_bindings WHERE serial_hash=? AND enabled=1"
+  ).bind(hash).first();
+  if (row?.owner_user_id == null) return null;
+  const ownerUserId = Number(row.owner_user_id);
+  await env.DB.prepare(
+    "INSERT INTO quota_resets(telegram_user_id,reset_at) VALUES(?,?) " +
+    "ON CONFLICT(telegram_user_id) DO UPDATE SET reset_at=excluded.reset_at"
+  ).bind(ownerUserId, now()).run();
+  return ownerUserId;
+}
+
 function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
   const rows: any[] = [];
   for (const [key, label] of Object.entries(BOOL_LABELS)) {
@@ -531,6 +584,15 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     }
     return;
   }
+  if (command === "resetquota") {
+    if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
+    const serial = args[0] || "";
+    if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/resetquota 序列号"); return; }
+    const ownerUserId = await resetSerialQuota(env, serial);
+    if (ownerUserId == null) await sendMessage(env, chatId, "该序列号未绑定启用中的 Telegram 账号。");
+    else await sendMessage(env, chatId, `已重置该序列号绑定账号（${ownerUserId}）的构建次数。`);
+    return;
+  }
   if (command === "allowed") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
     const result: any = await env.DB.prepare("SELECT serial_value,owner_user_id,enabled FROM serial_bindings ORDER BY enabled DESC,serial_value").all();
@@ -598,14 +660,19 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     await editMessage(env, chatId, messageId, "构建脚本绑定复核失败，请重新使用 /build。"); return;
   }
   if (!isAdmin(env, userId)) {
-    const latest: any = await env.DB.prepare("SELECT MAX(created_at) AS latest FROM builds WHERE telegram_user_id=?").bind(userId).first();
+    const submittedAt = now();
+    const [dayStart, dayEnd] = beijingDayBounds(submittedAt);
+    const quotaStart = await quotaStartForUser(env, userId, dayStart);
+    const latest: any = await env.DB.prepare(
+      "SELECT MAX(created_at) AS latest FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
+    ).bind(userId, quotaStart, dayEnd).first();
     const cooldown = Number(env.BUILD_COOLDOWN_SECONDS || 600);
-    const wait = latest?.latest ? Math.max(0, cooldown - (now() - Number(latest.latest))) : 0;
+    const wait = latest?.latest ? Math.max(0, cooldown - (submittedAt - Number(latest.latest))) : 0;
     if (wait) { await editMessage(env, chatId, messageId, `请在 ${wait} 秒后再构建。`); return; }
-    const beijingNow = now() + 8 * 3600;
-    const dayStart = Math.floor(beijingNow / 86400) * 86400 - 8 * 3600;
-    const count: any = await env.DB.prepare("SELECT COUNT(*) AS total FROM builds WHERE telegram_user_id=? AND created_at>=?").bind(userId, dayStart).first();
-    const beijingDate = new Date(beijingNow * 1000).toISOString().slice(0, 10);
+    const count: any = await env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
+    ).bind(userId, quotaStart, dayEnd).first();
+    const beijingDate = new Date((submittedAt + 8 * 3600) * 1000).toISOString().slice(0, 10);
     const dailyBonus = env.DAILY_BUILD_BONUS_DATE === beijingDate ? Number(env.DAILY_BUILD_BONUS || 0) : 0;
     const limit = Number(env.DAILY_BUILD_LIMIT || 2) + Math.max(0, dailyBonus);
     if (Number(count?.total || 0) >= limit) { await editMessage(env, chatId, messageId, `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。`); return; }
@@ -625,11 +692,10 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (gh.status !== 204) { console.error("GitHub dispatch", gh.status, await gh.text()); await editMessage(env, chatId, messageId, "GitHub 构建触发失败，请联系管理员。"); return; }
   const serialHash = await digestSerial(env, serial); const created = now();
   try {
-    await env.DB.batch([
-      env.DB.prepare("INSERT INTO builds(telegram_user_id,serial_hash,workflow_file,inputs,created_at) VALUES(?,?,?,?,?)").bind(userId, serialHash, workflowFile, JSON.stringify(inputs), created),
-      env.DB.prepare("INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,'submitted',?,?)")
-        .bind(requestId, userId, userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(inputs), created, created),
-    ]);
+    await env.DB.prepare(
+      "INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) " +
+      "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
+    ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(inputs), created, created).run();
   } catch (e) { console.error("record build", e); await editMessage(env, chatId, messageId, "构建已触发，但状态登记失败，请联系管理员。"); return; }
   await clearSession(env, userId); await editMessage(env, chatId, messageId, "构建已提交，请等待完成。完成后机器人会直接发送刷机包。");
 }
@@ -842,8 +908,9 @@ async function processJob(env: Env, job: any) {
   if (run.status !== "completed") return;
   if (run.conclusion !== "success") { await sendMessage(env, job.chat_id, "本次构建失败，请联系管理员。"); await finishJob(env, job.request_id, "failed", runId); return; }
   const claimed = await env.DB.prepare(
-    "UPDATE build_jobs SET status='delivering',updated_at=? WHERE request_id=? AND (status IN ('running','delivery_pending') OR (status='delivering' AND updated_at<=?))"
-  ).bind(now(), job.request_id, now() - 300).run();
+    "UPDATE build_jobs SET status='delivering',succeeded_at=COALESCE(succeeded_at,?),updated_at=? " +
+    "WHERE request_id=? AND (status IN ('running','delivery_pending') OR (status='delivering' AND updated_at<=?))"
+  ).bind(now(), now(), job.request_id, now() - 300).run();
   if (!Number(claimed.meta.changes || 0)) return;
   const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers: ghHeaders(env) });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
@@ -881,8 +948,9 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const dataMigration = await applyDataMigrations(env);
+    const quotaMigration = await applyQuotaMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
@@ -907,6 +975,7 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil((async () => {
       await applyDataMigrations(env);
+      await applyQuotaMigration(env);
       await monitorBuilds(env);
     })());
   },

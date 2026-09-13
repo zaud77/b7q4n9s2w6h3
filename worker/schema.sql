@@ -45,11 +45,18 @@ CREATE TABLE IF NOT EXISTS build_jobs (
   inputs TEXT NOT NULL,
   github_run_id INTEGER,
   status TEXT NOT NULL,
+  succeeded_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_build_jobs_status ON build_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_build_jobs_quota ON build_jobs(telegram_user_id, created_at, succeeded_at);
+
+CREATE TABLE IF NOT EXISTS quota_resets (
+  telegram_user_id INTEGER PRIMARY KEY,
+  reset_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
