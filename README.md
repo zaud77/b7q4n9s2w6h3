@@ -15,7 +15,7 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 - 每个 TG 账号按北京时间自然日最多成功提交 2 次构建，失败的 GitHub 触发不计次数。
 - 提交后不向普通用户显示 GitHub 仓库、Actions 地址、构建配置或交付说明；机器人持久化跟踪对应运行，成功后只私聊发送请求的 ZIP 文件，机器人重启后继续跟踪。所有者仍可查看维护信息。
 - `/allow` 和白名单文件只登记序列号，不要求 Telegram ID；用户首次通过入频道验证时自动绑定其 Telegram 账号，防止之后被他人借用。
-- 菜单按机型和平台区分：一加 15、15T、骁龙 SM8845 Ace 6T、骁龙 SM8850 Pad 3 Pro、天玑 MT6993 Find X9 和 Ace 6 Ultra。只有官方源码存在对应版本提交时才显示金标或紫标风驰。
+- 菜单按机型和平台区分：一加 15、15T、骁龙 SM8845 Ace 6T、骁龙 SM8850 Pad 3 Pro、天玑 MT6993 Find X9 和 Ace 6 Ultra。Find X9、Ace6T 等有对应元数据源的机型分别显示金标和紫标风驰。
 - 支持 KernelSU 分支、SUSFS、NoMount、KPM、LZ4/Zstd、LZ4KD、zarm、Unicode、BBR/Brutal、Droidspaces、网络增强、ADIOS、Re-Kernel和基带保护；自用配置仅 6.12.23 一加 15 入口可用，且仅所有者可见。
 - SUSFS/NoMount 自动互斥，zarm 强制依赖 LZ4KD；触发前再次检查频道和数据库。
 - 只有 `ADMIN_USER_IDS` 中的所有者可使用管理员命令：`/allow 序列号`、`/revoke 序列号`、`/allowed`、`/joinlink`。`/revoke` 会直接删除白名单记录，并清除该序列号用户的脚本绑定。

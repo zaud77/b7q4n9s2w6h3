@@ -50,6 +50,7 @@ SCRIPTS = {
     "623m": (
         "6.12.23 · OPPO Find X9",
         {
+            "gold": ("金标", "623mg"),
             "purple": ("紫标", "623mp"),
         },
     ),
@@ -82,6 +83,7 @@ WORKFLOWS = {
     "638ag": ("6.12.38 · OnePlus Ace 6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"),
     "638ap": ("6.12.38 · OnePlus Ace 6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"),
     "658p": ("6.12.58 · OnePlus Pad 3 Pro · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"),
+    "623mg": ("6.12.23 · OPPO Find X9 · 金标", "fastbuild_6.12.23_mtk_hmbird_gold.yml"),
     "623mp": ("6.12.23 · OPPO Find X9 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"),
     "658mg": ("6.12.58 · OnePlus Ace 6 Ultra · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"),
     "658mp": ("6.12.58 · OnePlus Ace 6 Ultra · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"),
@@ -97,7 +99,6 @@ LEGACY_WORKFLOW_KEYS = {
     **WORKFLOW_SCRIPTS,
     # These variants were removed because the official source has no matching
     # HMBIRD commit. Keep old database bindings pointed at the device menu.
-    "623mg": "623m",
     "658g": "658",
 }
 
