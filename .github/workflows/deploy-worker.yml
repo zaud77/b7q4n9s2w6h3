@@ -35,5 +35,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       - name: Apply and verify production data migration
         run: |
-          curl --fail --retry 5 --retry-delay 2 https://gki.zaomin.dpdns.org/health \
-            | jq -e '.ok == true and .dataMigration == "migration:explicit-workflow-binding-v2"'
+          for attempt in {1..10}; do
+            response=$(curl --silent --show-error --fail https://gki.zaomin.dpdns.org/health) || true
+            if jq -e '.ok == true and .dataMigration == "migration:explicit-workflow-binding-v2"' <<<"$response"; then
+              exit 0
+            fi
+            echo "Waiting for the new Worker version (attempt $attempt/10)"
+            sleep 3
+          done
+          echo "$response"
+          exit 1
