@@ -22,6 +22,7 @@ type Session = {
   awaitingJoinSerial?: boolean;
   serial?: string;
   workflow?: string;
+  selectedScript?: string;
   options?: Record<string, string>;
   ownerDirectedBuild?: boolean;
   deliveryChatId?: number;
@@ -279,9 +280,17 @@ async function allowSerial(env: Env, serial: string, createdBy: number) {
 async function revokeSerial(env: Env, serial: string): Promise<boolean> {
   const hash = await digestSerial(env, serial);
   const record: any = await env.SERIALS.get(`serial:${hash}`, "json");
-  if (!record) return false;
-  await env.SERIALS.put(`serial:${hash}`, JSON.stringify({ ...record, enabled: false }));
-  await env.DB.prepare("UPDATE serial_bindings SET enabled=0 WHERE serial_hash=?").bind(hash).run();
+  const row: any = await env.DB.prepare("SELECT owner_user_id FROM serial_bindings WHERE serial_hash=?").bind(hash).first();
+  if (!record && !row) return false;
+  await env.SERIALS.delete(`serial:${hash}`);
+  const index = (await env.SERIALS.get("serial:index", "json") as string[] | null) || [];
+  if (index.includes(hash)) await env.SERIALS.put("serial:index", JSON.stringify(index.filter(value => value !== hash)));
+  const statements = [env.DB.prepare("DELETE FROM serial_bindings WHERE serial_hash=?").bind(hash)];
+  if (row?.owner_user_id != null) {
+    statements.push(env.DB.prepare("DELETE FROM workflow_bindings WHERE telegram_user_id=?").bind(row.owner_user_id));
+    statements.push(env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=?").bind(row.owner_user_id));
+  }
+  await env.DB.batch(statements);
   return true;
 }
 
@@ -303,9 +312,10 @@ function workflowMarkup() {
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
-function variantMarkup(scriptKey: string, showBack = true) {
+function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
   const variants = SCRIPTS[scriptKey][1]!;
   const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
+  if (showBind) rows.push([{ text: "🔒 绑定此脚本", callback_data: `bind:${scriptKey}` }]);
   if (showBack) rows.push([{ text: "⬅️ 上一步", callback_data: "back:scripts" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
@@ -427,7 +437,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
     const serial = args[0] || "";
     if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/revoke 序列号"); return; }
-    await sendMessage(env, chatId, await revokeSerial(env, serial) ? "已撤销。" : "数据库中没有该序列号。"); return;
+    await sendMessage(env, chatId, await revokeSerial(env, serial) ? "已从白名单删除，并清除该用户的脚本绑定。" : "数据库中没有该序列号。"); return;
   }
   if (command === "allowed") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
@@ -544,7 +554,7 @@ async function handleCallback(env: Env, update: any) {
   const data = query.data || ""; const session = await getSession(env, userId);
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
   if (data === "back:scripts") {
-    delete session.workflow; session.options = defaults();
+    delete session.workflow; delete session.selectedScript; session.options = defaults();
     if (!isAdmin(env, userId)) {
       const boundScript = await workflowForUser(env, userId);
       if (boundScript && SCRIPTS[boundScript]) {
@@ -565,16 +575,29 @@ async function handleCallback(env: Env, update: any) {
     await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[scriptKey][0]}\n请选择风驰版本：`, variantMarkup(scriptKey, isAdmin(env, userId)));
     return;
   }
+  if (data.startsWith("bind:")) {
+    const scriptKey = data.slice(5);
+    if (isAdmin(env, userId)) { await answerCallback(env, query.id, "所有者无需绑定脚本", true); return; }
+    if (!SCRIPTS[scriptKey] || session.selectedScript !== scriptKey || !session.serial) {
+      await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return;
+    }
+    const current = await workflowForUser(env, userId);
+    if (current && current !== scriptKey) { await answerCallback(env, query.id, "该账号已绑定其他构建脚本", true); return; }
+    const boundScript = await bindWorkflow(env, userId, scriptKey);
+    await editMessage(env, chatId, messageId, `已绑定：${SCRIPTS[boundScript][0]}\n请选择风驰版本：`, variantMarkup(boundScript, false, false));
+    return;
+  }
   if (data.startsWith("kernel:")) {
     const key = data.slice(7);
     if (!SCRIPTS[key] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
-    if (!isAdmin(env, userId) && (await bindWorkflow(env, userId, key)) !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
+    const boundScript = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
+    if (boundScript && boundScript !== key) { await answerCallback(env, query.id, "该账号已绑定其他构建脚本", true); return; }
     const variants = SCRIPTS[key][1];
-    session.options = defaults();
+    session.options = defaults(); session.selectedScript = key;
     if (variants) {
       delete session.workflow;
       await setSession(env, userId, session);
-      await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key, isAdmin(env, userId)));
+      await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key, isAdmin(env, userId) || !boundScript, !isAdmin(env, userId) && !boundScript));
       return;
     }
     if (await workflowMaintenance(env, key)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
@@ -588,11 +611,26 @@ async function handleCallback(env: Env, update: any) {
     const variants = SCRIPTS[scriptKey]?.[1];
     if (!variants || !variants[variantKey] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
     const workflowKey = variants[variantKey][1];
+    if (!isAdmin(env, userId)) {
+      const boundScript = await workflowForUser(env, userId);
+      if (!boundScript) { await answerCallback(env, query.id, "请先点击“绑定此脚本”", true); return; }
+      if (boundScript !== scriptKey) { await answerCallback(env, query.id, "该账号已绑定其他构建脚本", true); return; }
+    }
     if (await workflowMaintenance(env, workflowKey)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
     session.workflow = workflowKey; session.options ||= defaults();
     applyWorkflowDefaults(workflowKey, session.options);
     await setSession(env, userId, session);
     await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[workflowKey][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey))); return;
+  }
+  if (!isAdmin(env, userId)) {
+    const boundScript = await workflowForUser(env, userId);
+    const selectedScript = WORKFLOW_SCRIPTS[session.workflow || ""];
+    if (!boundScript || selectedScript !== boundScript) {
+      delete session.workflow;
+      await setSession(env, userId, session);
+      await editMessage(env, chatId, messageId, "尚未绑定脚本，请先选择机型并点击“绑定此脚本”。", workflowMarkup());
+      return;
+    }
   }
   const options = session.options;
   if (!options) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }

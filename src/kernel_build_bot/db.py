@@ -106,10 +106,21 @@ class Database:
 
     def revoke_serial(self, serial: str) -> bool:
         with self._connect() as db:
+            row = db.execute(
+                "SELECT owner_user_id FROM serials WHERE serial_hash=?",
+                (self.serial_hash(serial),),
+            ).fetchone()
+            if row is None:
+                return False
             cursor = db.execute(
-                "UPDATE serials SET enabled=0 WHERE serial_hash=?",
+                "DELETE FROM serials WHERE serial_hash=?",
                 (self.serial_hash(serial),),
             )
+            if row["owner_user_id"] is not None:
+                db.execute(
+                    "DELETE FROM workflow_bindings WHERE telegram_user_id=?",
+                    (row["owner_user_id"],),
+                )
             return cursor.rowcount > 0
 
     def verify_serial(self, serial: str, user_id: int) -> bool:

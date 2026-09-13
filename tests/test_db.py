@@ -19,6 +19,7 @@ def test_serial_owner_and_revoke(tmp_path):
     assert db.serial_for_user(42) == "3B15A800Y5D00000"
     assert db.serial_for_user(43) is None
     assert db.verify_serial("3B15A800Y5D00000", 42)
+    assert db.bind_workflow(42, "623") == "623"
     assert not db.verify_serial("3B15A800Y5D00000", 43)
     assert db.serial_is_allowed("3B15A800Y5D00000")
     assert not db.verify_serial("3B15A800Y5D00001", 42)
@@ -27,6 +28,8 @@ def test_serial_owner_and_revoke(tmp_path):
     assert not db.verify_serial("3B15A800Y5D00000", 42)
     assert not db.serial_is_allowed("3B15A800Y5D00000")
     assert db.serial_for_user(42) is None
+    assert db.list_serials() == []
+    assert db.workflow_for_user(42) is None
 
 
 def test_pending_join_survives_database_reopen(tmp_path):
@@ -190,3 +193,18 @@ def test_variant_back_button_can_be_hidden_for_bound_users():
     ]
     assert any("上一步" in label for label in with_back)
     assert not any("上一步" in label for label in without_back)
+
+
+def test_variant_bind_button_is_only_shown_before_binding():
+    before_binding = [
+        button.text
+        for row in variant_markup("623", show_bind=True).inline_keyboard
+        for button in row
+    ]
+    after_binding = [
+        button.text
+        for row in variant_markup("623", show_back=False, show_bind=False).inline_keyboard
+        for button in row
+    ]
+    assert any("绑定此脚本" in label for label in before_binding)
+    assert not any("绑定此脚本" in label for label in after_binding)

@@ -181,12 +181,20 @@ def script_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def variant_markup(script_key: str, show_back: bool = True) -> InlineKeyboardMarkup:
+def variant_markup(
+    script_key: str,
+    show_back: bool = True,
+    show_bind: bool = False,
+) -> InlineKeyboardMarkup:
     variants = SCRIPTS[script_key][1]
     keyboard = [
         [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
         for variant_key, (label, _) in variants.items()
     ]
+    if show_bind:
+        keyboard.append(
+            [InlineKeyboardButton("🔒 绑定此脚本", callback_data=f"bind:{script_key}")]
+        )
     if show_back:
         keyboard.append([InlineKeyboardButton("⬅️ 上一步", callback_data="back:scripts")])
     keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
@@ -529,7 +537,9 @@ class KernelBuildBot:
             return
         if data == "back:scripts":
             context.user_data.pop("workflow", None)
+            context.user_data.pop("selected_script", None)
             context.user_data["options"] = defaults()
+            bound_script = None
             if not self.is_admin(query.from_user.id):
                 bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
                 if bound_script in SCRIPTS:
@@ -551,6 +561,28 @@ class KernelBuildBot:
                 reply_markup=variant_markup(script_key, show_back=self.is_admin(query.from_user.id)),
             )
             return
+        if data.startswith("bind:"):
+            script_key = data.split(":", 1)[1]
+            if self.is_admin(query.from_user.id):
+                await query.answer("所有者无需绑定脚本", show_alert=True)
+                return
+            if (
+                script_key not in SCRIPTS
+                or context.user_data.get("selected_script") != script_key
+                or "serial" not in context.user_data
+            ):
+                await query.edit_message_text("会话已失效，请重新使用 /build。")
+                return
+            bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
+            if bound_script and bound_script != script_key:
+                await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                return
+            bound_script = normalize_workflow_key(self.db.bind_workflow(query.from_user.id, script_key))
+            await query.edit_message_text(
+                f"已绑定：{SCRIPTS[bound_script][0]}\n请选择风驰版本：",
+                reply_markup=variant_markup(bound_script, show_back=False, show_bind=False),
+            )
+            return
         if data.startswith("kernel:"):
             key = data.split(":", 1)[1]
             if key not in SCRIPTS or "serial" not in context.user_data:
@@ -559,18 +591,24 @@ class KernelBuildBot:
             if not SCRIPTS[key][1] and self.db.workflow_maintenance(key):
                 await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
                 return
+            bound_script = None
             if not self.is_admin(query.from_user.id):
-                if normalize_workflow_key(self.db.bind_workflow(query.from_user.id, key)) != key:
+                bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
+                if bound_script and bound_script != key:
                     await query.answer("该账号已绑定其他构建脚本", show_alert=True)
-                    await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
                     return
             variants = SCRIPTS[key][1]
             context.user_data["options"] = defaults()
+            context.user_data["selected_script"] = key
             if variants:
                 context.user_data.pop("workflow", None)
                 await query.edit_message_text(
                     f"已选择：{SCRIPTS[key][0]}\n请选择风驰版本：",
-                    reply_markup=variant_markup(key, show_back=self.is_admin(query.from_user.id)),
+                    reply_markup=variant_markup(
+                        key,
+                        show_back=self.is_admin(query.from_user.id) or not bound_script,
+                        show_bind=not self.is_admin(query.from_user.id) and not bound_script,
+                    ),
                 )
                 return
             context.user_data["workflow"] = key
@@ -590,6 +628,14 @@ class KernelBuildBot:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
                 return
             workflow_key = variants[variant_key][1]
+            if not self.is_admin(query.from_user.id):
+                bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
+                if not bound_script:
+                    await query.answer("请先点击“绑定此脚本”", show_alert=True)
+                    return
+                if bound_script != script_key:
+                    await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                    return
             if self.db.workflow_maintenance(workflow_key):
                 await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
                 return
@@ -603,6 +649,16 @@ class KernelBuildBot:
                 ),
             )
             return
+        workflow_key = context.user_data.get("workflow", "")
+        if not self.is_admin(query.from_user.id):
+            bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
+            if not bound_script or WORKFLOW_SCRIPTS.get(workflow_key) != bound_script:
+                context.user_data.pop("workflow", None)
+                await query.edit_message_text(
+                    "尚未绑定脚本，请先选择机型并点击“绑定此脚本”。",
+                    reply_markup=script_markup(),
+                )
+                return
         options = context.user_data.get("options")
         if not options:
             await query.edit_message_text("会话已失效，请重新使用 /build。")
@@ -635,7 +691,6 @@ class KernelBuildBot:
         elif data == "dispatch":
             await self.dispatch(query, context)
             return
-        workflow_key = context.user_data.get("workflow", "")
         await query.edit_message_reply_markup(
             reply_markup=self.options_markup(
                 options,
@@ -987,7 +1042,11 @@ class KernelBuildBot:
             await update.effective_message.reply_text("用法：/revoke 序列号")
             return
         changed = self.db.revoke_serial(context.args[0])
-        await update.effective_message.reply_text("已撤销。" if changed else "数据库中没有该序列号。")
+        await update.effective_message.reply_text(
+            "已从白名单删除，并清除该用户的脚本绑定。"
+            if changed
+            else "数据库中没有该序列号。"
+        )
 
     async def allowed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):

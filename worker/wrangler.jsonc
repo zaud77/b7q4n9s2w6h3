@@ -20,7 +20,8 @@
     {
       "binding": "DB",
       "database_name": "oneplus-gki-build-bot",
-      "database_id": "2df371c1-33fe-49d3-b795-a7de8d2a18c1"
+      "database_id": "2df371c1-33fe-49d3-b795-a7de8d2a18c1",
+      "migrations_dir": "migrations"
     }
   ],
   "vars": {
