@@ -115,12 +115,14 @@ const BOOL_LABELS: Record<string, string> = {
   rekernel_enable: "Re-Kernel",
   baseband_guard: "基带保护",
 };
-const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowx", "ksu", "none"];
+const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
   resukisu: "ReSukiSU",
   sukisu: "SukiSU Ultra（ReSukiSU 内核）",
   ksunext: "KernelSU Next",
-  kowx: "KOWX Material",
+  kowsu: "KowSU",
+  // Keep D1 sessions created before the selector rename usable.
+  kowx: "KowSU",
   ksu: "KernelSU 原版",
   none: "无内置 KernelSU",
 };
@@ -237,7 +239,11 @@ async function syncCommandMenus(env: Env): Promise<string> {
 async function getSession(env: Env, userId: number): Promise<Session> {
   const row: any = await env.DB.prepare("SELECT data FROM sessions WHERE telegram_user_id=?").bind(userId).first();
   if (!row) return {};
-  try { return JSON.parse(row.data); } catch { return {}; }
+  try {
+    const session: Session = JSON.parse(row.data);
+    if (session.options?.ksu_type === "kowx") session.options.ksu_type = "kowsu";
+    return session;
+  } catch { return {}; }
 }
 async function setSession(env: Env, userId: number, data: Session) {
   await env.DB.prepare(
@@ -726,6 +732,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   }
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
   const options = { ...(session.options || defaults()) };
+  if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
   const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);

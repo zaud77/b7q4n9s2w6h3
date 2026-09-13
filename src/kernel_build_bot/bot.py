@@ -117,12 +117,14 @@ BOOL_LABELS = {
     "baseband_guard": "基带保护",
 }
 
-KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowx", "ksu", "none"]
+KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
 KSU_LABELS = {
     "resukisu": "ReSukiSU",
     "sukisu": "SukiSU Ultra（ReSukiSU 内核）",
     "ksunext": "KernelSU Next",
-    "kowx": "KOWX Material",
+    "kowsu": "KowSU",
+    # Keep stale in-memory sessions from older deployments renderable.
+    "kowx": "KowSU",
     "ksu": "KernelSU 原版",
     "none": "无内置 KernelSU",
 }
@@ -673,6 +675,8 @@ class KernelBuildBot:
         if not options:
             await query.edit_message_text("会话已失效，请重新使用 /build。")
             return
+        if options.get("ksu_type") == "kowx":
+            options["ksu_type"] = "kowsu"
         if data.startswith("toggle:"):
             key = data.split(":", 1)[1]
             if key not in BOOL_LABELS:
@@ -762,6 +766,8 @@ class KernelBuildBot:
             return
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
+        if inputs.get("ksu_type") == "kowx":
+            inputs["ksu_type"] = "kowsu"
         if not supports_self_config(workflow_key):
             inputs.pop("self_config", None)
         elif not self.is_admin(user_id):
