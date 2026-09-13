@@ -37,17 +37,17 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
     gold: ["金标", "638tg"],
     purple: ["紫标", "638tp"],
   }],
-  "623m": ["6.12.23 · OPPO Find X9 · 天玑 MT6993", {
+  "623m": ["6.12.23 · OPPO Find X9", {
     purple: ["紫标", "623mp"],
   }],
-  "638a": ["6.12.38 · OnePlus Ace 6T · 骁龙 SM8845", {
+  "638a": ["6.12.38 · OnePlus Ace 6T", {
     gold: ["金标", "638ag"],
     purple: ["紫标", "638ap"],
   }],
-  "658": ["6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850", {
+  "658": ["6.12.58 · OnePlus Pad 3 Pro", {
     purple: ["紫标", "658p"],
   }],
-  "658m": ["6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993", {
+  "658m": ["6.12.58 · OnePlus Ace 6 Ultra", {
     gold: ["金标", "658mg"],
     purple: ["紫标", "658mp"],
   }],
@@ -57,12 +57,12 @@ const WORKFLOWS: Record<string, [string, string]> = {
   "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
   "638tg": ["6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"],
   "638tp": ["6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
-  "638ag": ["6.12.38 · OnePlus Ace6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"],
-  "638ap": ["6.12.38 · OnePlus Ace6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"],
-  "658p": ["6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"],
-  "623mp": ["6.12.23 · OPPO Find X9 · 天玑 MT6993 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"],
-  "658mg": ["6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"],
-  "658mp": ["6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"],
+  "638ag": ["6.12.38 · OnePlus Ace 6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"],
+  "638ap": ["6.12.38 · OnePlus Ace 6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"],
+  "658p": ["6.12.58 · OnePlus Pad 3 Pro · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"],
+  "623mp": ["6.12.23 · OPPO Find X9 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"],
+  "658mg": ["6.12.58 · OnePlus Ace 6 Ultra · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"],
+  "658mp": ["6.12.58 · OnePlus Ace 6 Ultra · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"],
 };
 const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
   Object.entries(SCRIPTS).flatMap(([scriptKey, value]) =>
@@ -294,6 +294,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
   rows.push([{ text: `KernelSU：${options.ksu_type}`, callback_data: "cycle:ksu_type" }]);
   rows.push([{ text: `BBR/Brutal：${options.bbr_enable}`, callback_data: "cycle:bbr_enable" }]);
   rows.push([{ text: `Droidspaces：${options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" }]);
+  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }]);
   rows.push([{ text: "开始构建", callback_data: "dispatch" }, { text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
@@ -302,9 +303,10 @@ function workflowMarkup() {
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
-function variantMarkup(scriptKey: string) {
+function variantMarkup(scriptKey: string, showBack = true) {
   const variants = SCRIPTS[scriptKey][1]!;
   const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
+  if (showBack) rows.push([{ text: "⬅️ 上一步", callback_data: "back:scripts" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
@@ -399,7 +401,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
         applyWorkflowDefaults(bound, options);
       }
       await setSession(env, userId, session);
-      if (variants) await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择风驰版本：`, variantMarkup(bound));
+      if (variants) await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择风驰版本：`, variantMarkup(bound, isAdmin(env, userId)));
       else await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择功能：`, optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound)));
       return;
     }
@@ -541,15 +543,38 @@ async function handleCallback(env: Env, update: any) {
   }
   const data = query.data || ""; const session = await getSession(env, userId);
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
+  if (data === "back:scripts") {
+    delete session.workflow; session.options = defaults();
+    if (!isAdmin(env, userId)) {
+      const boundScript = await workflowForUser(env, userId);
+      if (boundScript && SCRIPTS[boundScript]) {
+        await setSession(env, userId, session);
+        await editMessage(env, chatId, messageId, `已绑定：${SCRIPTS[boundScript][0]}\n请选择风驰版本：`, variantMarkup(boundScript, false));
+        return;
+      }
+    }
+    await setSession(env, userId, session);
+    await editMessage(env, chatId, messageId, "请选择本次构建脚本：", workflowMarkup());
+    return;
+  }
+  if (data === "back:variant") {
+    const workflowKey = session.workflow || ""; const scriptKey = WORKFLOW_SCRIPTS[workflowKey];
+    delete session.workflow;
+    if (!scriptKey || !SCRIPTS[scriptKey]) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
+    await setSession(env, userId, session);
+    await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[scriptKey][0]}\n请选择风驰版本：`, variantMarkup(scriptKey, isAdmin(env, userId)));
+    return;
+  }
   if (data.startsWith("kernel:")) {
     const key = data.slice(7);
     if (!SCRIPTS[key] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
     if (!isAdmin(env, userId) && (await bindWorkflow(env, userId, key)) !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     const variants = SCRIPTS[key][1];
+    session.options = defaults();
     if (variants) {
       delete session.workflow;
       await setSession(env, userId, session);
-      await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key));
+      await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key, isAdmin(env, userId)));
       return;
     }
     if (await workflowMaintenance(env, key)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }

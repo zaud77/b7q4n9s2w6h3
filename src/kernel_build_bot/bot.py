@@ -48,26 +48,26 @@ SCRIPTS = {
         },
     ),
     "623m": (
-        "6.12.23 · OPPO Find X9 · 天玑 MT6993",
+        "6.12.23 · OPPO Find X9",
         {
             "purple": ("紫标", "623mp"),
         },
     ),
     "638a": (
-        "6.12.38 · OnePlus Ace 6T · 骁龙 SM8845",
+        "6.12.38 · OnePlus Ace 6T",
         {
             "gold": ("金标", "638ag"),
             "purple": ("紫标", "638ap"),
         },
     ),
     "658": (
-        "6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850",
+        "6.12.58 · OnePlus Pad 3 Pro",
         {
             "purple": ("紫标", "658p"),
         },
     ),
     "658m": (
-        "6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993",
+        "6.12.58 · OnePlus Ace 6 Ultra",
         {
             "gold": ("金标", "658mg"),
             "purple": ("紫标", "658mp"),
@@ -79,12 +79,12 @@ WORKFLOWS = {
     "623p": ("6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
     "638tg": ("6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"),
     "638tp": ("6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"),
-    "638ag": ("6.12.38 · OnePlus Ace6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"),
-    "638ap": ("6.12.38 · OnePlus Ace6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"),
-    "658p": ("6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"),
-    "623mp": ("6.12.23 · OPPO Find X9 · 天玑 MT6993 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"),
-    "658mg": ("6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"),
-    "658mp": ("6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"),
+    "638ag": ("6.12.38 · OnePlus Ace 6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"),
+    "638ap": ("6.12.38 · OnePlus Ace 6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"),
+    "658p": ("6.12.58 · OnePlus Pad 3 Pro · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"),
+    "623mp": ("6.12.23 · OPPO Find X9 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"),
+    "658mg": ("6.12.58 · OnePlus Ace 6 Ultra · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"),
+    "658mp": ("6.12.58 · OnePlus Ace 6 Ultra · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"),
 }
 WORKFLOW_SCRIPTS = {
     workflow_key: script_key
@@ -181,12 +181,14 @@ def script_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def variant_markup(script_key: str) -> InlineKeyboardMarkup:
+def variant_markup(script_key: str, show_back: bool = True) -> InlineKeyboardMarkup:
     variants = SCRIPTS[script_key][1]
     keyboard = [
         [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
         for variant_key, (label, _) in variants.items()
     ]
+    if show_back:
+        keyboard.append([InlineKeyboardButton("⬅️ 上一步", callback_data="back:scripts")])
     keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -400,9 +402,14 @@ class KernelBuildBot:
                 f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择风驰版本："
                 if variants
                 else f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择功能：",
-                reply_markup=variant_markup(bound_workflow)
-                if variants
-                else self.options_markup(options, self.is_admin(user.id) and supports_self_config(bound_workflow)),
+                reply_markup=(
+                    variant_markup(bound_workflow, show_back=self.is_admin(user.id))
+                    if variants
+                    else self.options_markup(
+                        options,
+                        self.is_admin(user.id) and supports_self_config(bound_workflow),
+                    )
+                ),
             )
             return
         prompt = "请选择本次构建脚本：" if self.is_admin(user.id) else "首次构建，请选择要绑定的构建脚本："
@@ -500,6 +507,7 @@ class KernelBuildBot:
                 [InlineKeyboardButton(f"KernelSU：{options['ksu_type']}", callback_data="cycle:ksu_type")],
                 [InlineKeyboardButton(f"BBR/Brutal：{options['bbr_enable']}", callback_data="cycle:bbr_enable")],
                 [InlineKeyboardButton(f"Droidspaces：{options['droidspaces_enable']}", callback_data="cycle:droidspaces_enable")],
+                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant")],
                 [InlineKeyboardButton("开始构建", callback_data="dispatch"), InlineKeyboardButton("取消", callback_data="cancel")],
             ]
         )
@@ -519,6 +527,30 @@ class KernelBuildBot:
             context.user_data.clear()
             await query.edit_message_text("已取消。")
             return
+        if data == "back:scripts":
+            context.user_data.pop("workflow", None)
+            context.user_data["options"] = defaults()
+            if not self.is_admin(query.from_user.id):
+                bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
+                if bound_script in SCRIPTS:
+                    await query.edit_message_text(
+                        f"已绑定：{SCRIPTS[bound_script][0]}\n请选择风驰版本：",
+                        reply_markup=variant_markup(bound_script, show_back=False),
+                    )
+                    return
+            await query.edit_message_text("请选择本次构建脚本：", reply_markup=script_markup())
+            return
+        if data == "back:variant":
+            workflow_key = context.user_data.pop("workflow", "")
+            script_key = WORKFLOW_SCRIPTS.get(workflow_key)
+            if not script_key or script_key not in SCRIPTS:
+                await query.edit_message_text("会话已失效，请重新使用 /build。")
+                return
+            await query.edit_message_text(
+                f"已选择：{SCRIPTS[script_key][0]}\n请选择风驰版本：",
+                reply_markup=variant_markup(script_key, show_back=self.is_admin(query.from_user.id)),
+            )
+            return
         if data.startswith("kernel:"):
             key = data.split(":", 1)[1]
             if key not in SCRIPTS or "serial" not in context.user_data:
@@ -533,11 +565,12 @@ class KernelBuildBot:
                     await query.edit_message_text("绑定状态已变化，请重新使用 /build。")
                     return
             variants = SCRIPTS[key][1]
+            context.user_data["options"] = defaults()
             if variants:
                 context.user_data.pop("workflow", None)
                 await query.edit_message_text(
                     f"已选择：{SCRIPTS[key][0]}\n请选择风驰版本：",
-                    reply_markup=variant_markup(key),
+                    reply_markup=variant_markup(key, show_back=self.is_admin(query.from_user.id)),
                 )
                 return
             context.user_data["workflow"] = key

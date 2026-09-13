@@ -6,6 +6,7 @@ from kernel_build_bot.bot import (
     defaults,
     normalize_workflow_key,
     parse_whitelist,
+    variant_markup,
     supports_self_config,
     WORKFLOWS,
 )
@@ -65,11 +66,19 @@ def test_workflow_menu_and_oneplus15t_defaults():
     assert [label for label, _ in SCRIPTS["623m"][1].values()] == ["紫标"]
     assert [label for label, _ in SCRIPTS["658"][1].values()] == ["紫标"]
     assert "Find X9" in SCRIPTS["623m"][0]
-    assert "天玑 MT6993" in SCRIPTS["623m"][0]
+    assert "天玑" not in SCRIPTS["623m"][0]
+    assert "MT6993" not in SCRIPTS["623m"][0]
     assert "Pad 3 Pro" in SCRIPTS["658"][0]
-    assert "骁龙 SM8850" in SCRIPTS["658"][0]
+    assert "骁龙" not in SCRIPTS["658"][0]
+    assert "SM8850" not in SCRIPTS["658"][0]
     assert "Ace 6 Ultra" in SCRIPTS["658m"][0]
-    assert "天玑 MT6993" in SCRIPTS["658m"][0]
+    assert "天玑" not in SCRIPTS["658m"][0]
+    assert "MT6993" not in SCRIPTS["658m"][0]
+    assert all(
+        marker not in label
+        for label, _ in WORKFLOWS.values()
+        for marker in ("骁龙", "天玑", "SM8845", "SM8850", "MT6993")
+    )
     assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
     assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
     assert WORKFLOWS["623mp"][1] == "fastbuild_6.12.23_mtk_hmbird_purple.yml"
@@ -169,3 +178,15 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     owner_labels = [button.text for row in owner_markup.inline_keyboard for button in row]
     assert not any("自用配置" in label for label in public_labels)
     assert any("自用配置" in label for label in owner_labels)
+    assert any("上一步" in label for label in public_labels)
+
+
+def test_variant_back_button_can_be_hidden_for_bound_users():
+    with_back = [button.text for row in variant_markup("623").inline_keyboard for button in row]
+    without_back = [
+        button.text
+        for row in variant_markup("623", show_back=False).inline_keyboard
+        for button in row
+    ]
+    assert any("上一步" in label for label in with_back)
+    assert not any("上一步" in label for label in without_back)
