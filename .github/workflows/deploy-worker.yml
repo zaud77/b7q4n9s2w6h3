@@ -40,7 +40,7 @@ jobs:
             if jq -e '.ok == true
               and .dataMigration == "migration:explicit-workflow-binding-v2"
               and .quotaMigration == "migration:successful-build-quota-v1"
-              and .commandMenus == "commands:scoped-menus-v2"' <<<"$response"; then
+              and .commandMenus == "commands:scoped-menus-v3"' <<<"$response"; then
               exit 0
             fi
             echo "Waiting for the new Worker version (attempt $attempt/10)"

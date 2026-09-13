@@ -31,14 +31,13 @@ type Session = {
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
-const COMMAND_MENU_REVISION = "commands:scoped-menus-v2";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v3";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
 ];
 const VERIFIED_COMMANDS = [
   { command: "start", description: "启动机器人" },
-  { command: "join", description: "申请加入验证群组" },
   { command: "build", description: "构建绑定设备的内核" },
 ];
 const ADMIN_COMMANDS = [

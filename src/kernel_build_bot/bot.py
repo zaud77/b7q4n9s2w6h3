@@ -265,7 +265,6 @@ class KernelBuildBot:
         elif bound:
             commands = [
                 BotCommand("start", "启动机器人"),
-                BotCommand("join", "申请加入验证群组"),
                 BotCommand("build", "构建绑定设备的内核"),
             ]
         else:
@@ -836,7 +835,6 @@ class KernelBuildBot:
         ]
         verified_commands = [
             BotCommand("start", "启动机器人"),
-            BotCommand("join", "申请加入验证群组"),
             BotCommand("build", "构建绑定设备的内核"),
         ]
         await application.bot.set_my_commands(public_commands)
