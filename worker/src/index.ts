@@ -31,6 +31,26 @@ type Session = {
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v2";
+const UNVERIFIED_COMMANDS = [
+  { command: "start", description: "验证序列号" },
+  { command: "join", description: "验证序列号并申请入群" },
+];
+const VERIFIED_COMMANDS = [
+  { command: "start", description: "启动机器人" },
+  { command: "join", description: "申请加入验证群组" },
+  { command: "build", description: "构建绑定设备的内核" },
+];
+const ADMIN_COMMANDS = [
+  { command: "start", description: "启动机器人" },
+  { command: "build", description: "构建绑定设备的内核" },
+  { command: "buildfor", description: "为指定白名单序列号构建" },
+  { command: "allow", description: "添加白名单序列号" },
+  { command: "revoke", description: "撤销白名单序列号" },
+  { command: "resetquota", description: "重置序列号构建次数" },
+  { command: "allowed", description: "查看完整白名单" },
+  { command: "joinlink", description: "获取入群验证链接" },
+];
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
   "623": ["6.12.23 · OnePlus 15", {
     gold: ["金标", "623g"],
@@ -159,25 +179,10 @@ async function answerCallback(env: Env, id: string, text?: string, showAlert = f
 
 async function setUserCommands(env: Env, userId: number, bound: boolean): Promise<boolean> {
   const commands = isAdmin(env, userId)
-    ? [
-      { command: "start", description: "启动机器人" },
-      { command: "build", description: "构建绑定设备的内核" },
-      { command: "buildfor", description: "为指定白名单序列号构建" },
-      { command: "allow", description: "添加白名单序列号" },
-      { command: "revoke", description: "撤销白名单序列号" },
-      { command: "resetquota", description: "重置序列号构建次数" },
-      { command: "allowed", description: "查看完整白名单" },
-      { command: "joinlink", description: "获取入群验证链接" },
-    ]
+    ? ADMIN_COMMANDS
     : bound
-      ? [
-        { command: "start", description: "启动机器人" },
-        { command: "build", description: "构建绑定设备的内核" },
-      ]
-      : [
-        { command: "start", description: "验证序列号" },
-        { command: "join", description: "验证序列号并申请入群" },
-      ];
+      ? VERIFIED_COMMANDS
+      : UNVERIFIED_COMMANDS;
   try {
     await tg(env, "setMyCommands", { commands, scope: { type: "chat", chat_id: userId } });
     return true;
@@ -185,6 +190,41 @@ async function setUserCommands(env: Env, userId: number, bound: boolean): Promis
     console.error("set user commands failed", userId, String(error));
     return false;
   }
+}
+
+async function syncCommandMenus(env: Env): Promise<string> {
+  const marker: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?")
+    .bind(COMMAND_MENU_REVISION).first();
+  if (marker?.value === "done") return COMMAND_MENU_REVISION;
+
+  await tg(env, "setMyCommands", { commands: UNVERIFIED_COMMANDS });
+  for (const userId of admins(env)) {
+    await tg(env, "setMyCommands", {
+      commands: ADMIN_COMMANDS,
+      scope: { type: "chat", chat_id: userId },
+    });
+  }
+
+  const bindings: any = await env.DB.prepare(
+    "SELECT DISTINCT owner_user_id FROM serial_bindings WHERE enabled=1 AND owner_user_id IS NOT NULL"
+  ).all();
+  for (const row of bindings.results || []) {
+    const userId = Number(row.owner_user_id);
+    if (!userId || isAdmin(env, userId)) continue;
+    try {
+      await tg(env, "setMyCommands", {
+        commands: VERIFIED_COMMANDS,
+        scope: { type: "chat", chat_id: userId },
+      });
+    } catch (error) {
+      console.error("refresh verified user commands failed", userId, String(error));
+    }
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+  ).bind(COMMAND_MENU_REVISION).run();
+  return COMMAND_MENU_REVISION;
 }
 
 async function getSession(env: Env, userId: number): Promise<Session> {
@@ -950,16 +990,18 @@ export default {
     const dataMigration = await applyDataMigrations(env);
     const quotaMigration = await applyQuotaMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration });
+      const commandMenus = await syncCommandMenus(env);
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, commandMenus });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
-      await tg(env, "setMyCommands", {
-        commands: [
-          { command: "start", description: "验证序列号" },
-          { command: "join", description: "验证序列号并申请入群" },
-        ],
-      });
+      await tg(env, "setMyCommands", { commands: UNVERIFIED_COMMANDS });
+      for (const userId of admins(env)) {
+        await tg(env, "setMyCommands", {
+          commands: ADMIN_COMMANDS,
+          scope: { type: "chat", chat_id: userId },
+        });
+      }
       await tg(env, "setWebhook", {
         url: webhookUrl,
         secret_token: env.WEBHOOK_SECRET,

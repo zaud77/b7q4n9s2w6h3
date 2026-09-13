@@ -68,6 +68,10 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS quota_resets (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    reset_at INTEGER NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(serials)")}
@@ -256,12 +260,33 @@ class Database:
             ).fetchone()
             return int(row["total"])
 
-    def quota_reset_at(self) -> int:
+    def quota_reset_at(self, user_id: int | None = None) -> int:
         with self._connect() as db:
             row = db.execute(
                 "SELECT value FROM bot_state WHERE key='quota_reset_at'"
             ).fetchone()
-        return int(row["value"]) if row else 0
+            user_row = (
+                db.execute(
+                    "SELECT reset_at FROM quota_resets WHERE telegram_user_id=?",
+                    (user_id,),
+                ).fetchone()
+                if user_id is not None
+                else None
+            )
+        return max(
+            int(row["value"]) if row else 0,
+            int(user_row["reset_at"]) if user_row else 0,
+        )
+
+    def reset_user_build_quota(self, user_id: int, reset_at: int | None = None) -> int:
+        timestamp = int(time.time()) if reset_at is None else reset_at
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO quota_resets(telegram_user_id, reset_at) VALUES (?, ?)
+                   ON CONFLICT(telegram_user_id) DO UPDATE SET reset_at=excluded.reset_at""",
+                (user_id, timestamp),
+            )
+        return timestamp
 
     def reset_all_build_quotas(self, reset_at: int | None = None) -> int:
         timestamp = int(time.time()) if reset_at is None else reset_at

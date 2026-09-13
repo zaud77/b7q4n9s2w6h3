@@ -175,6 +175,15 @@ def test_global_quota_reset_keeps_build_history(tmp_path):
     assert db.count_builds(42, 0, 4_102_444_800) == 1
 
 
+def test_user_quota_reset_only_affects_selected_user(tmp_path):
+    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    reset_at = db.reset_user_build_quota(42, 1234)
+
+    assert reset_at == 1234
+    assert db.quota_reset_at(42) == 1234
+    assert db.quota_reset_at(43) == 0
+
+
 def test_workflow_maintenance_flag_persists(tmp_path):
     path = str(tmp_path / "bot.db")
     db = Database(path, "test-pepper")

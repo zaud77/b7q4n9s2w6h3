@@ -226,7 +226,7 @@ class KernelBuildBot:
         now = datetime.now(BUILD_TIMEZONE)
         start = datetime.combine(now.date(), datetime_time.min, tzinfo=BUILD_TIMEZONE)
         end = start + timedelta(days=1)
-        reset_at = self.db.quota_reset_at()
+        reset_at = self.db.quota_reset_at(user_id)
         quota_start = max(int(start.timestamp()), reset_at + 1 if reset_at else 0)
         return self.db.count_builds(user_id, quota_start, int(end.timestamp()))
 
@@ -258,12 +258,14 @@ class KernelBuildBot:
                 BotCommand("buildfor", "为指定白名单序列号构建"),
                 BotCommand("allow", "添加白名单序列号"),
                 BotCommand("revoke", "撤销白名单序列号"),
+                BotCommand("resetquota", "重置序列号构建次数"),
                 BotCommand("allowed", "查看完整白名单"),
                 BotCommand("joinlink", "获取入群验证链接"),
             ]
         elif bound:
             commands = [
                 BotCommand("start", "启动机器人"),
+                BotCommand("join", "申请加入验证群组"),
                 BotCommand("build", "构建绑定设备的内核"),
             ]
         else:
@@ -828,8 +830,14 @@ class KernelBuildBot:
             BotCommand("buildfor", "为指定白名单序列号构建"),
             BotCommand("allow", "添加白名单序列号"),
             BotCommand("revoke", "撤销白名单序列号"),
+            BotCommand("resetquota", "重置序列号构建次数"),
             BotCommand("allowed", "查看完整白名单"),
             BotCommand("joinlink", "获取入频道验证链接"),
+        ]
+        verified_commands = [
+            BotCommand("start", "启动机器人"),
+            BotCommand("join", "申请加入验证群组"),
+            BotCommand("build", "构建绑定设备的内核"),
         ]
         await application.bot.set_my_commands(public_commands)
         for admin_user_id in self.settings.admin_user_ids:
@@ -837,6 +845,19 @@ class KernelBuildBot:
                 owner_commands,
                 scope=BotCommandScopeChat(chat_id=admin_user_id),
             )
+        verified_user_ids = {
+            int(row["owner_user_id"])
+            for row in self.db.list_serials()
+            if row["enabled"] and row["owner_user_id"] is not None
+        }
+        for user_id in verified_user_ids - self.settings.admin_user_ids:
+            try:
+                await application.bot.set_my_commands(
+                    verified_commands,
+                    scope=BotCommandScopeChat(chat_id=user_id),
+                )
+            except Exception:
+                logging.exception("failed to refresh commands for verified user %s", user_id)
         self._monitor_task = asyncio.create_task(self.monitor_builds(application))
 
     async def post_shutdown(self, application: Application) -> None:
@@ -1101,6 +1122,24 @@ class KernelBuildBot:
             chunk += "\n" + line
         await update.effective_message.reply_text(chunk)
 
+    async def reset_quota(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.reject_while_building(update):
+            return
+        if not self.is_admin(update.effective_user.id):
+            await update.effective_message.reply_text("无权使用管理员命令。")
+            return
+        if not context.args or not SERIAL_RE.fullmatch(context.args[0]):
+            await update.effective_message.reply_text("用法：/resetquota 序列号")
+            return
+        owner_user_id = self.db.owner_for_serial(context.args[0])
+        if owner_user_id is None:
+            await update.effective_message.reply_text("该序列号未绑定启用中的 Telegram 账号。")
+            return
+        self.db.reset_user_build_quota(owner_user_id)
+        await update.effective_message.reply_text(
+            f"已重置该序列号绑定账号（{owner_user_id}）的构建次数。"
+        )
+
     async def join_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
             return
@@ -1169,6 +1208,7 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("buildfor", self.build_for))
         app.add_handler(CommandHandler("allow", self.allow))
         app.add_handler(CommandHandler("revoke", self.revoke))
+        app.add_handler(CommandHandler("resetquota", self.reset_quota))
         app.add_handler(CommandHandler("allowed", self.allowed))
         app.add_handler(CommandHandler("joinlink", self.join_link))
         app.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
