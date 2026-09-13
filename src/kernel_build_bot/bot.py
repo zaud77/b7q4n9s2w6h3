@@ -48,28 +48,26 @@ SCRIPTS = {
         },
     ),
     "623m": (
-        "6.12.23 · 天玑",
+        "6.12.23 · OPPO Find X9 · 天玑 MT6993",
         {
-            "gold": ("金标", "623mg"),
             "purple": ("紫标", "623mp"),
         },
     ),
     "638a": (
-        "6.12.38 · OnePlus Ace6T",
+        "6.12.38 · OnePlus Ace 6T · 骁龙 SM8845",
         {
             "gold": ("金标", "638ag"),
             "purple": ("紫标", "638ap"),
         },
     ),
     "658": (
-        "6.12.58",
+        "6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850",
         {
-            "gold": ("金标", "658g"),
             "purple": ("紫标", "658p"),
         },
     ),
     "658m": (
-        "6.12.58 · 天玑",
+        "6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993",
         {
             "gold": ("金标", "658mg"),
             "purple": ("紫标", "658mp"),
@@ -83,12 +81,10 @@ WORKFLOWS = {
     "638tp": ("6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"),
     "638ag": ("6.12.38 · OnePlus Ace6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"),
     "638ap": ("6.12.38 · OnePlus Ace6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"),
-    "658g": ("6.12.58 · 金标", "fastbuild_6.12.58_hmbird_gold.yml"),
-    "658p": ("6.12.58 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"),
-    "623mg": ("6.12.23 · 天玑 · 金标", "fastbuild_6.12.23_mtk_hmbird_gold.yml"),
-    "623mp": ("6.12.23 · 天玑 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"),
-    "658mg": ("6.12.58 · 天玑 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"),
-    "658mp": ("6.12.58 · 天玑 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"),
+    "658p": ("6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"),
+    "623mp": ("6.12.23 · OPPO Find X9 · 天玑 MT6993 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"),
+    "658mg": ("6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"),
+    "658mp": ("6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"),
 }
 WORKFLOW_SCRIPTS = {
     workflow_key: script_key
@@ -97,7 +93,13 @@ WORKFLOW_SCRIPTS = {
 }
 ONEPLUS_15_WORKFLOW_KEYS = {"623g", "623p"}
 ONEPLUS_15T_WORKFLOW_KEYS = {"638tg", "638tp"}
-LEGACY_WORKFLOW_KEYS = {key: script_key for key, script_key in WORKFLOW_SCRIPTS.items()}
+LEGACY_WORKFLOW_KEYS = {
+    **WORKFLOW_SCRIPTS,
+    # These variants were removed because the official source has no matching
+    # HMBIRD commit. Keep old database bindings pointed at the device menu.
+    "623mg": "623m",
+    "658g": "658",
+}
 
 BOOL_LABELS = {
     "self_config": "自用配置",

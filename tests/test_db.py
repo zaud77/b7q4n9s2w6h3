@@ -62,16 +62,24 @@ def test_workflow_menu_and_oneplus15t_defaults():
     assert list(SCRIPTS) == ["623", "638t", "623m", "638a", "658", "658m"]
     assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标", "紫标"]
     assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标", "紫标"]
+    assert [label for label, _ in SCRIPTS["623m"][1].values()] == ["紫标"]
+    assert [label for label, _ in SCRIPTS["658"][1].values()] == ["紫标"]
+    assert "Find X9" in SCRIPTS["623m"][0]
+    assert "天玑 MT6993" in SCRIPTS["623m"][0]
+    assert "Pad 3 Pro" in SCRIPTS["658"][0]
+    assert "骁龙 SM8850" in SCRIPTS["658"][0]
+    assert "Ace 6 Ultra" in SCRIPTS["658m"][0]
+    assert "天玑 MT6993" in SCRIPTS["658m"][0]
     assert WORKFLOWS["623g"][1] == "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"
     assert WORKFLOWS["638tp"][1] == "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"
-    assert WORKFLOWS["623mg"][1] == "fastbuild_6.12.23_mtk_hmbird_gold.yml"
     assert WORKFLOWS["623mp"][1] == "fastbuild_6.12.23_mtk_hmbird_purple.yml"
     assert WORKFLOWS["638ag"][1] == "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"
     assert WORKFLOWS["638ap"][1] == "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"
-    assert WORKFLOWS["658g"][1] == "fastbuild_6.12.58_hmbird_gold.yml"
     assert WORKFLOWS["658p"][1] == "fastbuild_6.12.58_hmbird_purple.yml"
     assert WORKFLOWS["658mg"][1] == "fastbuild_6.12.58_mtk_hmbird_gold.yml"
     assert WORKFLOWS["658mp"][1] == "fastbuild_6.12.58_mtk_hmbird_purple.yml"
+    assert "623mg" not in WORKFLOWS
+    assert "658g" not in WORKFLOWS
 
     options = apply_workflow_defaults("638tg", defaults())
     assert options["lz4_enable"] == "false"

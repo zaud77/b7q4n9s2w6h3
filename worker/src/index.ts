@@ -37,19 +37,17 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
     gold: ["金标", "638tg"],
     purple: ["紫标", "638tp"],
   }],
-  "623m": ["6.12.23 · 天玑", {
-    gold: ["金标", "623mg"],
+  "623m": ["6.12.23 · OPPO Find X9 · 天玑 MT6993", {
     purple: ["紫标", "623mp"],
   }],
-  "638a": ["6.12.38 · OnePlus Ace6T", {
+  "638a": ["6.12.38 · OnePlus Ace 6T · 骁龙 SM8845", {
     gold: ["金标", "638ag"],
     purple: ["紫标", "638ap"],
   }],
-  "658": ["6.12.58", {
-    gold: ["金标", "658g"],
+  "658": ["6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850", {
     purple: ["紫标", "658p"],
   }],
-  "658m": ["6.12.58 · 天玑", {
+  "658m": ["6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993", {
     gold: ["金标", "658mg"],
     purple: ["紫标", "658mp"],
   }],
@@ -61,12 +59,10 @@ const WORKFLOWS: Record<string, [string, string]> = {
   "638tp": ["6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
   "638ag": ["6.12.38 · OnePlus Ace6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"],
   "638ap": ["6.12.38 · OnePlus Ace6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"],
-  "658g": ["6.12.58 · 金标", "fastbuild_6.12.58_hmbird_gold.yml"],
-  "658p": ["6.12.58 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"],
-  "623mg": ["6.12.23 · 天玑 · 金标", "fastbuild_6.12.23_mtk_hmbird_gold.yml"],
-  "623mp": ["6.12.23 · 天玑 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"],
-  "658mg": ["6.12.58 · 天玑 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"],
-  "658mp": ["6.12.58 · 天玑 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"],
+  "658p": ["6.12.58 · OnePlus Pad 3 Pro · 骁龙 SM8850 · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"],
+  "623mp": ["6.12.23 · OPPO Find X9 · 天玑 MT6993 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"],
+  "658mg": ["6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"],
+  "658mp": ["6.12.58 · OnePlus Ace 6 Ultra · 天玑 MT6993 · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"],
 };
 const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
   Object.entries(SCRIPTS).flatMap(([scriptKey, value]) =>
@@ -75,7 +71,13 @@ const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
 );
 const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
-const LEGACY_WORKFLOW_KEYS: Record<string, string> = WORKFLOW_SCRIPTS;
+const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
+  ...WORKFLOW_SCRIPTS,
+  // Preserve old device bindings after variants without an official matching
+  // HMBIRD commit were removed from the selectable workflow list.
+  "623mg": "623m",
+  "658g": "658",
+};
 const BOOL_LABELS: Record<string, string> = {
   self_config: "自用配置",
   susfs_enable: "SUSFS",
@@ -658,18 +660,6 @@ function unwrapArtifact(bytes: Uint8Array, pattern: RegExp): { name: string; byt
   return { name: matches[0][0].split("/").pop()!, bytes: matches[0][1] };
 }
 
-function ak3DeliveryFilename(workflowFile: string, artifactName: string, inputs: any): string {
-  const serial = String(inputs.device_serial || "unknown").replace(/[^A-Za-z0-9._:-]/g, "_");
-  const target = workflowFile.includes("oneplus_15t_hmbird_gold") ? "OP15T_6.12.38_GoldHmbird"
-    : workflowFile.includes("oneplus_15t_hmbird_purple") ? "OP15T_6.12.38_PurpleHmbird"
-      : workflowFile.includes("oneplus_15_hmbird_gold") ? "OP15_6.12.23_GoldHmbird"
-        : workflowFile.includes("oneplus_15_hmbird_purple") ? "OP15_6.12.23_PurpleHmbird"
-    : workflowFile.includes("oneplus_15t") ? "OP15T_6.12.38"
-      : workflowFile.includes("6.12.38") ? "Ace6T_6.12.38" : "6.12.58";
-  const ksu = artifactName.match(/_(ReSukiSU|SukiSU|KSUNext|KSU)(?:_(\d+))?_/i);
-  const ksuTag = ksu ? `_${ksu[1]}${ksu[2] ? `_${ksu[2]}` : ""}` : "";
-  return `AK3_${target}${ksuTag}_SN-${serial}.zip`;
-}
 async function processJob(env: Env, job: any) {
   const root = `https://api.github.com/repos/${env.GITHUB_REPO}`; let run: any; let runId = job.github_run_id;
   if (!runId) {
@@ -703,7 +693,7 @@ async function processJob(env: Env, job: any) {
   const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers: ghHeaders(env) });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
   let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
-  const packages: Array<[RegExp, RegExp, string | undefined, boolean, boolean]> = [[/^(AnyKernel3|ak3)_.*\.zip$/i, /^(AnyKernel3|ak3)_.*\.zip$/i, isAdmin(env, job.chat_id) ? "构建完成，刷机前请确认机型和序列号。" : undefined, false, false]];
+  const packages: Array<[RegExp, RegExp, string | undefined, boolean, boolean]> = [[/^(AnyKernel3|ak3)_.*\.zip$/i, /^(AnyKernel3|ak3)_.*\.zip$/i, isAdmin(env, job.chat_id) ? "构建完成，刷机前请确认机型和序列号。" : undefined, false, true]];
   if (String(inputs.nomount_enable).toLowerCase() === "true") packages.push([/^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$/i, /^NoMount(?:-Suite)?(?:[-_].*)?\.zip$/i, isAdmin(env, job.chat_id) ? "NoMount 模块已随本次构建生成。" : undefined, false, true]);
   for (const [artifactPattern, filePattern, caption, unwrap, preserveName] of packages) {
     const artifact = artifacts.find(a => artifactPattern.test(a.name || "") && !a.expired); if (!artifact) return;
@@ -712,7 +702,7 @@ async function processJob(env: Env, job: any) {
     const originalName = String(artifact.name || "NoMount.zip");
     const filename = preserveName
       ? (originalName.toLowerCase().endsWith(".zip") ? originalName : `${originalName}.zip`)
-      : (unwrapped?.name || ak3DeliveryFilename(job.workflow_file, originalName, inputs));
+      : (unwrapped?.name || originalName);
     await sendDocument(env, Number(job.chat_id), filename, unwrapped?.bytes || outer, caption);
   }
   await finishJob(env, job.request_id, "sent", runId);
