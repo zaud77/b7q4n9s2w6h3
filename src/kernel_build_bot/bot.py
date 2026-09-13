@@ -117,7 +117,15 @@ BOOL_LABELS = {
     "baseband_guard": "基带保护",
 }
 
-KSU_VALUES = ["resukisu", "sukisu", "ksunext", "ksu", "none"]
+KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowx", "ksu", "none"]
+KSU_LABELS = {
+    "resukisu": "ReSukiSU",
+    "sukisu": "SukiSU Ultra（ReSukiSU 内核）",
+    "ksunext": "KernelSU Next",
+    "kowx": "KOWX Material",
+    "ksu": "KernelSU 原版",
+    "none": "无内置 KernelSU",
+}
 BBR_VALUES = ["false", "true", "default"]
 DROID_VALUES = ["false", "standard", "extend"]
 BUILD_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -514,7 +522,7 @@ class KernelBuildBot:
             rows.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"toggle:{key}")])
         rows.extend(
             [
-                [InlineKeyboardButton(f"KernelSU：{options['ksu_type']}", callback_data="cycle:ksu_type")],
+                [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data="cycle:ksu_type")],
                 [InlineKeyboardButton(f"BBR/Brutal：{options['bbr_enable']}", callback_data="cycle:bbr_enable")],
                 [InlineKeyboardButton(f"Droidspaces：{options['droidspaces_enable']}", callback_data="cycle:droidspaces_enable")],
                 [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant")],

@@ -115,7 +115,15 @@ const BOOL_LABELS: Record<string, string> = {
   rekernel_enable: "Re-Kernel",
   baseband_guard: "基带保护",
 };
-const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "ksu", "none"];
+const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowx", "ksu", "none"];
+const KSU_LABELS: Record<string, string> = {
+  resukisu: "ReSukiSU",
+  sukisu: "SukiSU Ultra（ReSukiSU 内核）",
+  ksunext: "KernelSU Next",
+  kowx: "KOWX Material",
+  ksu: "KernelSU 原版",
+  none: "无内置 KernelSU",
+};
 const BBR_VALUES = ["false", "true", "default"];
 const DROID_VALUES = ["false", "standard", "extend"];
 
@@ -470,7 +478,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
     if (key === "self_config" && !showSelf) continue;
     rows.push([{ text: `${options[key] === "true" ? "✅" : "⬜"} ${label}`, callback_data: `toggle:${key}` }]);
   }
-  rows.push([{ text: `KernelSU：${options.ksu_type}`, callback_data: "cycle:ksu_type" }]);
+  rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: "cycle:ksu_type" }]);
   rows.push([{ text: `BBR/Brutal：${options.bbr_enable}`, callback_data: "cycle:bbr_enable" }]);
   rows.push([{ text: `Droidspaces：${options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" }]);
   rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }]);
