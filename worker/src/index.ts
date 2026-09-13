@@ -29,7 +29,7 @@ type Session = {
 };
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
-const WORKFLOW_BINDING_EPOCH = 1789287000;
+const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
   "623": ["6.12.23 · OnePlus 15", {
     gold: ["金标", "623g"],
@@ -155,7 +155,7 @@ async function answerCallback(env: Env, id: string, text?: string, showAlert = f
   return tg(env, "answerCallbackQuery", { callback_query_id: id, ...(text ? { text, show_alert: showAlert } : {}) });
 }
 
-async function setUserCommands(env: Env, userId: number, bound: boolean) {
+async function setUserCommands(env: Env, userId: number, bound: boolean): Promise<boolean> {
   const commands = isAdmin(env, userId)
     ? [
       { command: "start", description: "启动机器人" },
@@ -177,8 +177,10 @@ async function setUserCommands(env: Env, userId: number, bound: boolean) {
       ];
   try {
     await tg(env, "setMyCommands", { commands, scope: { type: "chat", chat_id: userId } });
+    return true;
   } catch (error) {
     console.error("set user commands failed", userId, String(error));
+    return false;
   }
 }
 
@@ -278,11 +280,31 @@ async function allowSerial(env: Env, serial: string, createdBy: number) {
     "ON CONFLICT(serial_hash) DO UPDATE SET serial_value=excluded.serial_value,enabled=1"
   ).bind(hash, serial, now(), createdBy).run();
 }
-async function revokeSerial(env: Env, serial: string): Promise<boolean> {
+async function removeRevokedUserAccess(env: Env, userId: number): Promise<boolean> {
+  await clearSession(env, userId);
+  const commandsReset = await setUserCommands(env, userId, false);
+  if (isAdmin(env, userId)) return commandsReset;
+  try {
+    await tg(env, "banChatMember", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId });
+    await tg(env, "unbanChatMember", {
+      chat_id: env.REQUIRED_CHANNEL_ID,
+      user_id: userId,
+      only_if_banned: true,
+    });
+    return commandsReset;
+  } catch (error) {
+    console.error("remove revoked user from group failed", userId, String(error));
+    return false;
+  }
+}
+
+type RevokeResult = { removed: boolean; ownerUserId?: number; accessReset?: boolean };
+
+async function revokeSerial(env: Env, serial: string): Promise<RevokeResult> {
   const hash = await digestSerial(env, serial);
   const record: any = await env.SERIALS.get(`serial:${hash}`, "json");
   const row: any = await env.DB.prepare("SELECT owner_user_id FROM serial_bindings WHERE serial_hash=?").bind(hash).first();
-  if (!record && !row) return false;
+  if (!record && !row) return { removed: false };
   await env.SERIALS.delete(`serial:${hash}`);
   const index = (await env.SERIALS.get("serial:index", "json") as string[] | null) || [];
   if (index.includes(hash)) await env.SERIALS.put("serial:index", JSON.stringify(index.filter(value => value !== hash)));
@@ -290,9 +312,63 @@ async function revokeSerial(env: Env, serial: string): Promise<boolean> {
   if (row?.owner_user_id != null) {
     statements.push(env.DB.prepare("DELETE FROM workflow_bindings WHERE telegram_user_id=?").bind(row.owner_user_id));
     statements.push(env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=?").bind(row.owner_user_id));
+    statements.push(env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(row.owner_user_id));
   }
   await env.DB.batch(statements);
-  return true;
+  if (row?.owner_user_id == null) return { removed: true };
+  const ownerUserId = Number(row.owner_user_id);
+  return { removed: true, ownerUserId, accessReset: await removeRevokedUserAccess(env, ownerUserId) };
+}
+
+async function applyDataMigrations(env: Env): Promise<string> {
+  const marker: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?").bind(DATA_MIGRATION_KEY).first();
+  if (marker?.value === "done") return DATA_MIGRATION_KEY;
+
+  let pendingUserIds: number[] = [];
+  if (marker?.value) {
+    try {
+      const state = JSON.parse(marker.value);
+      pendingUserIds = Array.isArray(state.pendingUserIds)
+        ? state.pendingUserIds.map(Number).filter(Number.isFinite)
+        : [];
+    } catch {
+      pendingUserIds = [];
+    }
+  } else {
+    const disabled: any = await env.DB.prepare(
+      "SELECT serial_hash,owner_user_id FROM serial_bindings WHERE enabled=0"
+    ).all();
+    const disabledRows: any[] = disabled.results || [];
+    const disabledHashes = new Set(disabledRows.map(row => String(row.serial_hash)));
+    for (const hash of disabledHashes) await env.SERIALS.delete(`serial:${hash}`);
+    const index = (await env.SERIALS.get("serial:index", "json") as string[] | null) || [];
+    await env.SERIALS.put("serial:index", JSON.stringify(index.filter(hash => !disabledHashes.has(hash))));
+    pendingUserIds = [...new Set(
+      disabledRows
+        .filter(row => row.owner_user_id != null)
+        .map(row => Number(row.owner_user_id))
+        .filter(Number.isFinite)
+    )];
+    const value = pendingUserIds.length ? JSON.stringify({ pendingUserIds }) : "done";
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM workflow_bindings"),
+      env.DB.prepare("DELETE FROM sessions"),
+      env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id IN (SELECT owner_user_id FROM serial_bindings WHERE enabled=0)"),
+      env.DB.prepare("DELETE FROM serial_bindings WHERE enabled=0"),
+      env.DB.prepare(
+        "INSERT INTO bot_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+      ).bind(DATA_MIGRATION_KEY, value),
+    ]);
+  }
+
+  if (!pendingUserIds.length) return DATA_MIGRATION_KEY;
+  const remaining: number[] = [];
+  for (const userId of pendingUserIds) {
+    if (!(await removeRevokedUserAccess(env, userId))) remaining.push(userId);
+  }
+  const value = remaining.length ? JSON.stringify({ pendingUserIds: remaining }) : "done";
+  await env.DB.prepare("UPDATE bot_state SET value=? WHERE key=?").bind(value, DATA_MIGRATION_KEY).run();
+  return remaining.length ? `${DATA_MIGRATION_KEY}:telegram-cleanup-pending` : DATA_MIGRATION_KEY;
 }
 
 function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
@@ -323,15 +399,14 @@ function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
 }
 
 async function workflowForUser(env: Env, userId: number): Promise<string | null> {
-  const row: any = await env.DB.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=? AND bound_at>=?").bind(userId, WORKFLOW_BINDING_EPOCH).first();
+  const row: any = await env.DB.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?").bind(userId).first();
   return normalizeWorkflowKey(row?.workflow_key);
 }
 async function bindWorkflow(env: Env, userId: number, key: string): Promise<string> {
   await env.DB.prepare(
     "INSERT INTO workflow_bindings(telegram_user_id,workflow_key,bound_at) VALUES(?,?,?) " +
-    "ON CONFLICT(telegram_user_id) DO UPDATE SET workflow_key=excluded.workflow_key,bound_at=excluded.bound_at " +
-    "WHERE workflow_bindings.bound_at<?"
-  ).bind(userId, key, now(), WORKFLOW_BINDING_EPOCH).run();
+    "ON CONFLICT(telegram_user_id) DO NOTHING"
+  ).bind(userId, key, now()).run();
   return (await workflowForUser(env, userId))!;
 }
 async function workflowMaintenance(env: Env, key: string): Promise<boolean> {
@@ -441,7 +516,19 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
     const serial = args[0] || "";
     if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/revoke 序列号"); return; }
-    await sendMessage(env, chatId, await revokeSerial(env, serial) ? "已从白名单删除，并清除该用户的脚本绑定。" : "数据库中没有该序列号。"); return;
+    const result = await revokeSerial(env, serial);
+    if (!result.removed) {
+      await sendMessage(env, chatId, "数据库中没有该序列号。");
+    } else if (result.ownerUserId == null) {
+      await sendMessage(env, chatId, "已从白名单删除。");
+    } else if (isAdmin(env, result.ownerUserId)) {
+      await sendMessage(env, chatId, "已从白名单删除并清除脚本绑定；管理员账号不会被移出群组。");
+    } else if (result.accessReset) {
+      await sendMessage(env, chatId, "已从白名单删除，清除脚本绑定和会话，将绑定用户移出群组，并恢复为仅 /start、/join。");
+    } else {
+      await sendMessage(env, chatId, "白名单、脚本绑定、会话和命令已清理，但移出群组失败；请检查机器人管理员权限。");
+    }
+    return;
   }
   if (command === "allowed") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
@@ -792,7 +879,10 @@ async function monitorBuilds(env: Env) {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/health") return Response.json({ ok: true, service: "oneplus-gki-build-bot" });
+    const dataMigration = await applyDataMigrations(env);
+    if (request.method === "GET" && url.pathname === "/health") {
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration });
+    }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
       await tg(env, "setMyCommands", {
@@ -813,5 +903,10 @@ export default {
     if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
     const update = await request.json(); ctx.waitUntil(handleUpdate(env, update)); return new Response("OK");
   },
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) { ctx.waitUntil(monitorBuilds(env)); },
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil((async () => {
+      await applyDataMigrations(env);
+      await monitorBuilds(env);
+    })());
+  },
 };

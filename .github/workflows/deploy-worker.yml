@@ -33,3 +33,7 @@ jobs:
       - run: pnpm run deploy:worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Apply and verify production data migration
+        run: |
+          curl --fail --retry 5 --retry-delay 2 https://gki.zaomin.dpdns.org/health \
+            | jq -e '.ok == true and .dataMigration == "migration:explicit-workflow-binding-v2"'

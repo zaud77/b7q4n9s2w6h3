@@ -1,4 +1,4 @@
-from kernel_build_bot.db import Database, WORKFLOW_BINDING_EPOCH
+from kernel_build_bot.db import Database, WORKFLOW_BINDING_MIGRATION
 from kernel_build_bot.bot import (
     KernelBuildBot,
     SCRIPTS,
@@ -17,6 +17,7 @@ def test_serial_owner_and_revoke(tmp_path):
     db.allow_serial("3B15A800Y5D00000", 42, 1)
     assert db.list_serials()[0]["serial_value"] == "3B15A800Y5D00000"
     assert db.serial_for_user(42) == "3B15A800Y5D00000"
+    assert db.owner_for_serial("3B15A800Y5D00000") == 42
     assert db.serial_for_user(43) is None
     assert db.verify_serial("3B15A800Y5D00000", 42)
     assert db.bind_workflow(42, "623") == "623"
@@ -29,6 +30,7 @@ def test_serial_owner_and_revoke(tmp_path):
     assert not db.serial_is_allowed("3B15A800Y5D00000")
     assert db.serial_for_user(42) is None
     assert db.list_serials() == []
+    assert db.owner_for_serial("3B15A800Y5D00000") is None
     assert db.workflow_for_user(42) is None
 
 
@@ -62,14 +64,23 @@ def test_workflow_binding_is_first_choice_and_build_count_is_bounded(tmp_path):
     assert db.count_builds(43, 0, 4_102_444_800) == 0
 
 
-def test_legacy_workflow_binding_requires_explicit_rebind(tmp_path):
-    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+def test_data_migration_deletes_legacy_bindings_and_revoked_serials(tmp_path):
+    path = str(tmp_path / "bot.db")
+    db = Database(path, "test-pepper")
     with db._connect() as connection:
+        connection.execute("DELETE FROM bot_state WHERE key=?", (WORKFLOW_BINDING_MIGRATION,))
         connection.execute(
             "INSERT INTO workflow_bindings(telegram_user_id, workflow_key, bound_at) VALUES (?, ?, ?)",
-            (42, "623", WORKFLOW_BINDING_EPOCH - 1),
+            (42, "623", 1),
         )
+        connection.execute(
+            """INSERT INTO serials(serial_hash, serial_value, serial_tail, owner_user_id, enabled, created_at, created_by)
+               VALUES (?, ?, ?, ?, 0, 1, 1)""",
+            (db.serial_hash("3B15A800Y5D00000"), "3B15A800Y5D00000", "0000", 42),
+        )
+    db = Database(path, "test-pepper")
     assert db.workflow_for_user(42) is None
+    assert db.list_serials() == []
     assert db.bind_workflow(42, "658") == "658"
     assert db.bind_workflow(42, "623") == "658"
 

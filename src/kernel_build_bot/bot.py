@@ -1041,11 +1041,40 @@ class KernelBuildBot:
         if not context.args or not SERIAL_RE.fullmatch(context.args[0]):
             await update.effective_message.reply_text("用法：/revoke 序列号")
             return
-        changed = self.db.revoke_serial(context.args[0])
+        serial = context.args[0]
+        owner_user_id = self.db.owner_for_serial(serial)
+        changed = self.db.revoke_serial(serial)
+        if not changed:
+            await update.effective_message.reply_text("数据库中没有该序列号。")
+            return
+        if owner_user_id is None:
+            await update.effective_message.reply_text("已从白名单删除。")
+            return
+
+        user_data = context.application.user_data.get(owner_user_id)
+        if user_data is not None:
+            user_data.clear()
+        await self.sync_user_commands(context, owner_user_id, False)
+        if self.is_admin(owner_user_id):
+            await update.effective_message.reply_text(
+                "已从白名单删除并清除脚本绑定；管理员账号不会被移出群组。"
+            )
+            return
+        try:
+            await context.bot.ban_chat_member(self.settings.required_channel_id, owner_user_id)
+            await context.bot.unban_chat_member(
+                self.settings.required_channel_id,
+                owner_user_id,
+                only_if_banned=True,
+            )
+        except Exception:
+            logging.exception("failed to remove revoked user %s from group", owner_user_id)
+            await update.effective_message.reply_text(
+                "白名单、脚本绑定、会话和命令已清理，但移出群组失败；请检查机器人管理员权限。"
+            )
+            return
         await update.effective_message.reply_text(
-            "已从白名单删除，并清除该用户的脚本绑定。"
-            if changed
-            else "数据库中没有该序列号。"
+            "已从白名单删除，清除脚本绑定和会话，将绑定用户移出群组，并恢复为仅 /start、/join。"
         )
 
     async def allowed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-WORKFLOW_BINDING_EPOCH = 1789287000
+WORKFLOW_BINDING_MIGRATION = "migration:explicit-workflow-binding-v2"
 
 
 class Database:
@@ -88,6 +88,17 @@ class Database:
                    ), inputs)
                    WHERE inputs='{}'"""
             )
+            migration = db.execute(
+                "SELECT value FROM bot_state WHERE key=?",
+                (WORKFLOW_BINDING_MIGRATION,),
+            ).fetchone()
+            if migration is None:
+                db.execute("DELETE FROM workflow_bindings")
+                db.execute("DELETE FROM serials WHERE enabled=0")
+                db.execute(
+                    "INSERT INTO bot_state(key, value) VALUES (?, 'done')",
+                    (WORKFLOW_BINDING_MIGRATION,),
+                )
 
     def serial_hash(self, serial: str) -> str:
         return hmac.new(self.pepper, serial.encode("ascii"), hashlib.sha256).hexdigest()
@@ -123,7 +134,19 @@ class Database:
                     "DELETE FROM workflow_bindings WHERE telegram_user_id=?",
                     (row["owner_user_id"],),
                 )
+                db.execute(
+                    "DELETE FROM pending_joins WHERE telegram_user_id=?",
+                    (row["owner_user_id"],),
+                )
             return cursor.rowcount > 0
+
+    def owner_for_serial(self, serial: str) -> int | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT owner_user_id FROM serials WHERE serial_hash=?",
+                (self.serial_hash(serial),),
+            ).fetchone()
+        return row["owner_user_id"] if row else None
 
     def verify_serial(self, serial: str, user_id: int) -> bool:
         with self._connect() as db:
@@ -154,8 +177,8 @@ class Database:
     def workflow_for_user(self, user_id: int) -> str | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=? AND bound_at>=?",
-                (user_id, WORKFLOW_BINDING_EPOCH),
+                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?",
+                (user_id,),
             ).fetchone()
             return row["workflow_key"] if row else None
 
@@ -165,15 +188,12 @@ class Database:
             db.execute(
                 """INSERT INTO workflow_bindings(telegram_user_id, workflow_key, bound_at)
                    VALUES (?, ?, ?)
-                   ON CONFLICT(telegram_user_id) DO UPDATE SET
-                     workflow_key=excluded.workflow_key,
-                     bound_at=excluded.bound_at
-                   WHERE workflow_bindings.bound_at<?""",
-                (user_id, workflow_key, int(time.time()), WORKFLOW_BINDING_EPOCH),
+                   ON CONFLICT(telegram_user_id) DO NOTHING""",
+                (user_id, workflow_key, int(time.time())),
             )
             row = db.execute(
-                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=? AND bound_at>=?",
-                (user_id, WORKFLOW_BINDING_EPOCH),
+                "SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=?",
+                (user_id,),
             ).fetchone()
             return row["workflow_key"]
 
