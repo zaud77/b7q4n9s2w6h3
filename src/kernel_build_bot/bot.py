@@ -131,6 +131,12 @@ KSU_LABELS = {
 BBR_VALUES = ["false", "true", "default"]
 DROID_VALUES = ["false", "standard", "extend"]
 BUILD_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
+KOWSU_LATEST_RELEASE_API = "https://api.github.com/repos/zaominn/KowSU/releases/latest"
+KOWSU_MANAGER_ASSET_RE = re.compile(r"^KowSU-Manager-.*\.apk$", re.I)
+
+
+def is_kowsu_selection(value: object) -> bool:
+    return str(value or "").strip().lower() in {"kowsu", "kowx"}
 
 
 def parse_whitelist(text: str) -> tuple[list[tuple[str, int | None]], list[str]]:
@@ -971,6 +977,7 @@ class KernelBuildBot:
             except (json.JSONDecodeError, TypeError):
                 build_inputs = {}
             nomount_requested = str(build_inputs.get("nomount_enable", "false")).lower() == "true"
+            kowsu_requested = is_kowsu_selection(build_inputs.get("ksu_type"))
 
             packages = [
                 (
@@ -1012,6 +1019,37 @@ class KernelBuildBot:
 
             with tempfile.TemporaryDirectory(prefix="oneplus-gki-") as temp_dir:
                 temp = Path(temp_dir)
+                kowsu_manager = None
+                if kowsu_requested:
+                    release_response = await client.get(KOWSU_LATEST_RELEASE_API)
+                    release_response.raise_for_status()
+                    manager_asset = next(
+                        (
+                            item
+                            for item in release_response.json().get("assets", [])
+                            if KOWSU_MANAGER_ASSET_RE.fullmatch(item.get("name", ""))
+                        ),
+                        None,
+                    )
+                    if manager_asset is None:
+                        raise RuntimeError(
+                            "KowSU manager APK is missing from the latest release"
+                        )
+                    manager_path = temp / manager_asset["name"]
+                    async with client.stream(
+                        "GET",
+                        manager_asset["url"],
+                        headers={**self.github_headers(), "Accept": "application/octet-stream"},
+                    ) as download:
+                        download.raise_for_status()
+                        with manager_path.open("wb") as output:
+                            async for chunk in download.aiter_bytes():
+                                output.write(chunk)
+                    with manager_path.open("rb") as manager_file:
+                        if manager_file.read(2) != b"PK":
+                            raise RuntimeError("KowSU manager download is not an APK archive")
+                    kowsu_manager = (manager_path, manager_asset["name"])
+
                 for index, (artifact, filename_pattern, caption, extract_nested) in enumerate(
                     selected_packages
                 ):
@@ -1047,6 +1085,19 @@ class KernelBuildBot:
                             filename=send_name,
                             # Regular recipients receive files without build details.
                             caption=caption if self.is_admin(job["chat_id"]) else None,
+                            read_timeout=120,
+                            write_timeout=120,
+                            connect_timeout=30,
+                            pool_timeout=30,
+                        )
+                if kowsu_manager is not None:
+                    manager_path, manager_name = kowsu_manager
+                    with manager_path.open("rb") as document:
+                        await application.bot.send_document(
+                            chat_id=job["chat_id"],
+                            document=document,
+                            filename=manager_name,
+                            caption="KowSU 最新正式管理器，与本次 KowSU 内核配套。",
                             read_timeout=120,
                             write_timeout=120,
                             connect_timeout=30,

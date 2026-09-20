@@ -4,12 +4,21 @@ from kernel_build_bot.bot import (
     SCRIPTS,
     apply_workflow_defaults,
     defaults,
+    is_kowsu_selection,
     normalize_workflow_key,
     parse_whitelist,
     variant_markup,
     supports_self_config,
     WORKFLOWS,
 )
+
+
+def test_kowsu_manager_delivery_selection():
+    assert is_kowsu_selection("kowsu")
+    assert is_kowsu_selection("KowSU")
+    assert is_kowsu_selection("kowx")
+    assert not is_kowsu_selection("resukisu")
+    assert not is_kowsu_selection(None)
 
 
 def test_serial_owner_and_revoke(tmp_path):

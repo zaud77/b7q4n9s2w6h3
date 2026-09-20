@@ -128,6 +128,8 @@ const KSU_LABELS: Record<string, string> = {
 };
 const BBR_VALUES = ["false", "true", "default"];
 const DROID_VALUES = ["false", "standard", "extend"];
+const KOWSU_LATEST_RELEASE_API = "https://api.github.com/repos/zaominn/KowSU/releases/latest";
+const KOWSU_MANAGER_ASSET = /^KowSU-Manager-.*\.apk$/i;
 
 function now(): number { return Math.floor(Date.now() / 1000); }
 function admins(env: Env): Set<number> {
@@ -924,7 +926,10 @@ function ghHeaders(env: Env) {
 async function sendDocument(env: Env, chatId: number, filename: string, bytes: Uint8Array, caption?: string) {
   const form = new FormData(); form.set("chat_id", String(chatId));
   const payload = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-  form.set("document", new Blob([payload], { type: "application/zip" }), filename);
+  const contentType = filename.toLowerCase().endsWith(".apk")
+    ? "application/vnd.android.package-archive"
+    : "application/zip";
+  form.set("document", new Blob([payload], { type: contentType }), filename);
   if (caption) form.set("caption", caption);
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: form });
   if (!response.ok) throw new Error(`sendDocument ${response.status}: ${await response.text()}`);
@@ -933,6 +938,23 @@ function unwrapArtifact(bytes: Uint8Array, pattern: RegExp): { name: string; byt
   const files = unzipSync(bytes); const matches = Object.entries(files).filter(([name]) => pattern.test(name.split("/").pop() || ""));
   if (matches.length !== 1) return null;
   return { name: matches[0][0].split("/").pop()!, bytes: matches[0][1] };
+}
+
+async function downloadLatestKowSuManager(env: Env): Promise<{ name: string; bytes: Uint8Array }> {
+  const releaseResponse = await fetch(KOWSU_LATEST_RELEASE_API, { headers: ghHeaders(env) });
+  if (!releaseResponse.ok) throw new Error(`KowSU latest release ${releaseResponse.status}`);
+  const release: any = await releaseResponse.json();
+  const asset = (release.assets || []).find((item: any) => KOWSU_MANAGER_ASSET.test(String(item.name || "")));
+  if (!asset?.url) throw new Error("KowSU manager APK is missing from the latest release");
+
+  const headers = { ...ghHeaders(env), accept: "application/octet-stream" };
+  const download = await fetch(asset.url, { headers, redirect: "follow" });
+  if (!download.ok) throw new Error(`KowSU manager download ${download.status}`);
+  const bytes = new Uint8Array(await download.arrayBuffer());
+  if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+    throw new Error("KowSU manager download is not an APK archive");
+  }
+  return { name: String(asset.name), bytes };
 }
 
 async function processJob(env: Env, job: any) {
@@ -969,6 +991,8 @@ async function processJob(env: Env, job: any) {
   const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers: ghHeaders(env) });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
   let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
+  const kowsuRequested = ["kowsu", "kowx"].includes(String(inputs.ksu_type || "").toLowerCase());
+  const kowsuManager = kowsuRequested ? await downloadLatestKowSuManager(env) : null;
   const packages: Array<[RegExp, RegExp, string | undefined, boolean, boolean]> = [[/^(AnyKernel3|ak3)_.*\.zip$/i, /^(AnyKernel3|ak3)_.*\.zip$/i, isAdmin(env, job.chat_id) ? "构建完成，刷机前请确认机型和序列号。" : undefined, false, true]];
   if (String(inputs.nomount_enable).toLowerCase() === "true") packages.push([/^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$/i, /^NoMount(?:-Suite)?(?:[-_].*)?\.zip$/i, isAdmin(env, job.chat_id) ? "NoMount 模块已随本次构建生成。" : undefined, false, true]);
   for (const [artifactPattern, filePattern, caption, unwrap, preserveName] of packages) {
@@ -980,6 +1004,15 @@ async function processJob(env: Env, job: any) {
       ? (originalName.toLowerCase().endsWith(".zip") ? originalName : `${originalName}.zip`)
       : (unwrapped?.name || originalName);
     await sendDocument(env, Number(job.chat_id), filename, unwrapped?.bytes || outer, caption);
+  }
+  if (kowsuManager) {
+    await sendDocument(
+      env,
+      Number(job.chat_id),
+      kowsuManager.name,
+      kowsuManager.bytes,
+      "KowSU 最新正式管理器，与本次 KowSU 内核配套。",
+    );
   }
   await finishJob(env, job.request_id, "sent", runId);
 }
