@@ -47,7 +47,7 @@ class Settings:
             required_channel_url=os.environ.get("REQUIRED_CHANNEL_URL", "").strip(),
             github_token=github_token,
             github_use_gh_cli=github_use_gh_cli,
-            github_repo=os.environ.get("GITHUB_REPO", "zaomi893/miiza").strip(),
+            github_repo=os.environ.get("GITHUB_REPO", "zaomi893/t8x3p6r9m2k7").strip(),
             github_ref=os.environ.get("GITHUB_REF", "main").strip(),
             serial_pepper=_required("SERIAL_PEPPER"),
             database_path=os.environ.get("DATABASE_PATH", "data/bot.db").strip(),
