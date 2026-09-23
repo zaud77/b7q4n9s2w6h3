@@ -32,6 +32,7 @@ const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
+const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
 const COMMAND_MENU_REVISION = "commands:scoped-menus-v4";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
@@ -155,6 +156,49 @@ function defaults(): Record<string, string> {
     bbr_enable: "false", droidspaces_enable: "false",
     ccache_update: "false", ccache_debug: "false",
   });
+}
+function normalizeBuildOptions(saved: unknown, admin: boolean): Record<string, string> {
+  const options = defaults();
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) return options;
+  const values = saved as Record<string, unknown>;
+  for (const key of Object.keys(BOOL_LABELS)) {
+    if (key === "self_config" && !admin) continue;
+    if (values[key] === "true" || values[key] === "false") options[key] = values[key];
+  }
+  const ksuType = values.ksu_type === "kowx" ? "kowsu" : values.ksu_type;
+  if (typeof ksuType === "string" && KSU_VALUES.includes(ksuType)) options.ksu_type = ksuType;
+  if (typeof values.bbr_enable === "string" && BBR_VALUES.includes(values.bbr_enable)) options.bbr_enable = values.bbr_enable;
+  if (typeof values.droidspaces_enable === "string" && DROID_VALUES.includes(values.droidspaces_enable)) options.droidspaces_enable = values.droidspaces_enable;
+  if (options.susfs_enable === "true") options.nomount_enable = "false";
+  if (!admin) options.self_config = "false";
+  return options;
+}
+async function saveBuildPreferences(env: Env, userId: number, saved: unknown, admin: boolean) {
+  const options = normalizeBuildOptions(saved, admin);
+  await env.DB.prepare(
+    "INSERT INTO user_build_preferences(telegram_user_id,options,updated_at) VALUES(?,?,?) " +
+    "ON CONFLICT(telegram_user_id) DO UPDATE SET options=excluded.options,updated_at=excluded.updated_at"
+  ).bind(userId, JSON.stringify(options), now()).run();
+}
+async function loadBuildPreferences(env: Env, userId: number, admin: boolean): Promise<Record<string, string>> {
+  const row: any = await env.DB.prepare(
+    "SELECT options FROM user_build_preferences WHERE telegram_user_id=?"
+  ).bind(userId).first();
+  let saved: unknown;
+  if (row?.options) {
+    try { saved = JSON.parse(String(row.options)); } catch { saved = undefined; }
+  }
+  if (saved === undefined) {
+    const previous: any = await env.DB.prepare(
+      "SELECT inputs FROM build_jobs WHERE telegram_user_id=? AND inputs IS NOT NULL AND inputs!='{}' ORDER BY created_at DESC LIMIT 1"
+    ).bind(userId).first();
+    if (previous?.inputs) {
+      try { saved = JSON.parse(String(previous.inputs)); } catch { saved = undefined; }
+    }
+  }
+  const options = normalizeBuildOptions(saved, admin);
+  if (!row && saved !== undefined) await saveBuildPreferences(env, userId, options, admin);
+  return options;
 }
 function applyWorkflowDefaults(workflowKey: string, options: Record<string, string>): Record<string, string> {
   if (ONEPLUS_15T_WORKFLOW_KEYS.has(workflowKey)) {
@@ -530,6 +574,21 @@ async function applyChatHistoryMigration(env: Env): Promise<string> {
   return CHAT_HISTORY_MIGRATION_KEY;
 }
 
+async function applyBuildPreferencesMigration(env: Env): Promise<string> {
+  const marker: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?")
+    .bind(BUILD_PREFERENCES_MIGRATION_KEY).first();
+  if (marker?.value === "done") return BUILD_PREFERENCES_MIGRATION_KEY;
+  await env.DB.batch([
+    env.DB.prepare(
+      "CREATE TABLE IF NOT EXISTS user_build_preferences (telegram_user_id INTEGER PRIMARY KEY, options TEXT NOT NULL, updated_at INTEGER NOT NULL)"
+    ),
+    env.DB.prepare(
+      "INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+    ).bind(BUILD_PREFERENCES_MIGRATION_KEY),
+  ]);
+  return BUILD_PREFERENCES_MIGRATION_KEY;
+}
+
 function beijingDayBounds(timestamp: number): [number, number] {
   const shifted = timestamp + 8 * 3600;
   const start = Math.floor(shifted / 86400) * 86400 - 8 * 3600;
@@ -655,7 +714,7 @@ function workflowMarkup() {
 }
 function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
   const variants = SCRIPTS[scriptKey][1]!;
-  const rows = [Object.entries(variants).map(([key, value]) => ({ text: value[0], callback_data: `variant:${scriptKey}:${key}` }))];
+  const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
   if (showBind) rows.push([{ text: "🔒 绑定此脚本", callback_data: `bind:${scriptKey}` }]);
   if (showBack) rows.push([{ text: "⬅️ 上一步", callback_data: "back:scripts" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
@@ -738,7 +797,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const serial = await serialForUser(env, userId);
     if (!serial) { await sendMessage(env, chatId, "当前 Telegram 账号尚未绑定有效序列号，请先使用 /start。"); return; }
     const bound = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
-    const options = defaults();
+    const options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     const session: Session = { serial, options };
     if (bound) {
       if (!SCRIPTS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
@@ -768,7 +827,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const serial = args[0] || "";
     if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/buildfor 序列号"); return; }
     if (!(await serialRecord(env, serial))) { await sendMessage(env, chatId, "该序列号不在启用的白名单中。"); return; }
-    await setSession(env, userId, { serial, options: defaults(), ownerDirectedBuild: true, deliveryChatId: userId });
+    await setSession(env, userId, { serial, options: await loadBuildPreferences(env, userId, true), ownerDirectedBuild: true, deliveryChatId: userId });
     await sendMessage(env, chatId, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择构建脚本：`, workflowMarkup()); return;
   }
   if (command === "allow") {
@@ -889,7 +948,8 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     if (Number(count?.total || 0) >= limit) { await editMessage(env, chatId, messageId, `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。`); return; }
   }
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
-  const options = { ...(session.options || defaults()) };
+  const selectedOptions = { ...(session.options || defaults()) };
+  const options = { ...selectedOptions };
   delete options.zarm_tool;
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
@@ -910,6 +970,8 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
       "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
     ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(inputs), created, created).run();
   } catch (e) { console.error("record build", e); await editMessage(env, chatId, messageId, "构建已触发，但状态登记失败，请联系管理员。"); return; }
+  try { await saveBuildPreferences(env, userId, selectedOptions, isAdmin(env, userId)); }
+  catch (error) { console.error("save build preferences failed", userId, String(error)); }
   await clearSession(env, userId); await editMessage(env, chatId, messageId, "构建已提交，请等待完成。完成后机器人会直接发送刷机包。");
 }
 
@@ -944,7 +1006,7 @@ async function handleCallback(env: Env, update: any) {
   const session = await getSession(env, userId);
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
   if (data === "back:scripts") {
-    delete session.workflow; delete session.selectedScript; session.options = defaults();
+    delete session.workflow; delete session.selectedScript; session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     if (!isAdmin(env, userId)) {
       const boundScript = await workflowForUser(env, userId);
       if (boundScript && SCRIPTS[boundScript]) {
@@ -983,7 +1045,7 @@ async function handleCallback(env: Env, update: any) {
     const boundScript = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
     if (boundScript && boundScript !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     const variants = SCRIPTS[key][1];
-    session.options = defaults(); session.selectedScript = key;
+    session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId)); session.selectedScript = key;
     if (variants) {
       delete session.workflow;
       await setSession(env, userId, session);
@@ -1231,9 +1293,10 @@ export default {
     const dataMigration = await applyDataMigrations(env);
     const quotaMigration = await applyQuotaMigration(env);
     const chatHistoryMigration = await applyChatHistoryMigration(env);
+    const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, commandMenus });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
@@ -1261,6 +1324,7 @@ export default {
       await applyDataMigrations(env);
       await applyQuotaMigration(env);
       await applyChatHistoryMigration(env);
+      await applyBuildPreferencesMigration(env);
       await monitorBuilds(env);
     })());
   },

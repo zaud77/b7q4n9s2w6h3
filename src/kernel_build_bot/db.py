@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from pathlib import Path
 import sqlite3
 import time
@@ -52,6 +53,11 @@ class Database:
                     telegram_user_id INTEGER PRIMARY KEY,
                     workflow_key TEXT NOT NULL,
                     bound_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS build_preferences (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    options TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS build_jobs (
                     request_id TEXT PRIMARY KEY,
@@ -194,6 +200,34 @@ class Database:
                 (user_id,),
             ).fetchone()
             return row["workflow_key"] if row else None
+
+    def get_build_preferences(self, user_id: int) -> dict[str, str]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT options FROM build_preferences WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                row = db.execute(
+                    "SELECT inputs AS options FROM builds WHERE telegram_user_id=? "
+                    "ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (user_id,),
+                ).fetchone()
+        if row is None:
+            return {}
+        try:
+            options = json.loads(row["options"])
+        except (TypeError, ValueError):
+            return {}
+        return options if isinstance(options, dict) else {}
+
+    def save_build_preferences(self, user_id: int, options: dict[str, str]) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO build_preferences(telegram_user_id,options,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(telegram_user_id) DO UPDATE SET options=excluded.options,updated_at=excluded.updated_at",
+                (user_id, json.dumps(options, sort_keys=True), int(time.time())),
+            )
 
     def bind_workflow(self, user_id: int, workflow_key: str) -> str:
         """Bind once and return the authoritative workflow key."""

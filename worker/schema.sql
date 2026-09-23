@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_build_preferences (
+  telegram_user_id INTEGER PRIMARY KEY,
+  options TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS chat_messages (
   telegram_user_id INTEGER NOT NULL,
   chat_id INTEGER NOT NULL,

@@ -41,6 +41,7 @@ jobs:
               and .dataMigration == "migration:explicit-workflow-binding-v2"
               and .quotaMigration == "migration:successful-build-quota-v1"
               and .chatHistoryMigration == "migration:private-chat-clear-v1"
+              and .buildPreferencesMigration == "migration:user-build-preferences-v1"
               and .commandMenus == "commands:scoped-menus-v4"' <<<"$response"; then
               exit 0
             fi

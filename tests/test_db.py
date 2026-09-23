@@ -236,7 +236,7 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     ]
     assert public_rows[-2] == ["⬅️ 上一步", "取消"]
     assert public_rows[-1] == ["🚀 开始构建"]
-    assert [[button.text for button in row] for row in variant_markup("623").inline_keyboard[:1]] == [["金标", "紫标"]]
+    assert [[button.text for button in row] for row in variant_markup("623").inline_keyboard[:2]] == [["金标"], ["紫标"]]
     assert "SUSFS 与 NoMount 自动互斥" in options_prompt("623g")
 
 
@@ -265,4 +265,4 @@ def test_variant_bind_button_is_only_shown_before_binding():
     assert any("绑定此脚本" in label for label in before_binding)
     assert not any("绑定此脚本" in label for label in after_binding)
     variant_rows = variant_markup("623", show_back=False, show_bind=False).inline_keyboard
-    assert [[button.text for button in row] for row in variant_rows] == [["金标", "紫标"], ["取消"]]
+    assert [[button.text for button in row] for row in variant_rows] == [["金标"], ["紫标"], ["取消"]]

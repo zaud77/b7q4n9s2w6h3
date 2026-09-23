@@ -178,6 +178,32 @@ def defaults() -> dict[str, str]:
     return values
 
 
+def build_options_with_preferences(saved: object, is_admin: bool) -> dict[str, str]:
+    options = defaults()
+    if not isinstance(saved, dict):
+        return options
+    for key in BOOL_LABELS:
+        value = saved.get(key)
+        if (key != "self_config" or is_admin) and (value == "true" or value == "false"):
+            options[key] = value
+    ksu_type = saved.get("ksu_type")
+    if ksu_type == "kowx":
+        ksu_type = "kowsu"
+    if isinstance(ksu_type, str) and ksu_type in KSU_VALUES:
+        options["ksu_type"] = ksu_type
+    bbr = saved.get("bbr_enable")
+    if isinstance(bbr, str) and bbr in BBR_VALUES:
+        options["bbr_enable"] = bbr
+    droidspaces = saved.get("droidspaces_enable")
+    if isinstance(droidspaces, str) and droidspaces in DROID_VALUES:
+        options["droidspaces_enable"] = droidspaces
+    if options["susfs_enable"] == "true":
+        options["nomount_enable"] = "false"
+    if not is_admin:
+        options["self_config"] = "false"
+    return options
+
+
 def options_prompt(workflow_key: str, prefix: str = "已选择") -> str:
     return (
         f"{prefix}：{WORKFLOWS[workflow_key][0]}\n"
@@ -217,10 +243,10 @@ def variant_markup(
     show_bind: bool = False,
 ) -> InlineKeyboardMarkup:
     variants = SCRIPTS[script_key][1]
-    keyboard = [[
-        InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")
+    keyboard = [
+        [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
         for variant_key, (label, _) in variants.items()
-    ]]
+    ]
     if show_bind:
         keyboard.append(
             [InlineKeyboardButton("🔒 绑定此脚本", callback_data=f"bind:{script_key}")]
@@ -477,7 +503,9 @@ class KernelBuildBot:
             if self.is_admin(user.id)
             else normalize_workflow_key(self.db.workflow_for_user(user.id))
         )
-        options = defaults()
+        options = build_options_with_preferences(
+            self.db.get_build_preferences(user.id), self.is_admin(user.id)
+        )
         context.user_data.update(serial=serial, options=options)
         if bound_workflow:
             if bound_workflow not in SCRIPTS:
@@ -533,7 +561,9 @@ class KernelBuildBot:
         context.user_data.clear()
         context.user_data.update(
             serial=serial,
-            options=defaults(),
+            options=build_options_with_preferences(
+                self.db.get_build_preferences(user.id), self.is_admin(user.id)
+            ),
             owner_directed_build=True,
             delivery_chat_id=user.id,
         )
@@ -642,7 +672,9 @@ class KernelBuildBot:
         if data == "back:scripts":
             context.user_data.pop("workflow", None)
             context.user_data.pop("selected_script", None)
-            context.user_data["options"] = defaults()
+            context.user_data["options"] = build_options_with_preferences(
+                self.db.get_build_preferences(query.from_user.id), self.is_admin(query.from_user.id)
+            )
             bound_script = None
             if not self.is_admin(query.from_user.id):
                 bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
@@ -702,7 +734,9 @@ class KernelBuildBot:
                     await query.edit_message_text("该账号已绑定其他构建脚本。")
                     return
             variants = SCRIPTS[key][1]
-            context.user_data["options"] = defaults()
+            context.user_data["options"] = build_options_with_preferences(
+                self.db.get_build_preferences(query.from_user.id), self.is_admin(query.from_user.id)
+            )
             context.user_data["selected_script"] = key
             if variants:
                 context.user_data.pop("workflow", None)
@@ -930,6 +964,12 @@ class KernelBuildBot:
         self.db.record_build(user_id, serial, workflow, serialized_inputs)
         self.db.create_build_job(
             request_id, user_id, delivery_chat_id, workflow, serialized_inputs
+        )
+        self.db.save_build_preferences(
+            user_id,
+            build_options_with_preferences(
+                context.user_data["options"], self.is_admin(user_id)
+            ),
         )
         context.user_data.clear()
         await query.edit_message_text("构建已提交，请等待完成。完成后机器人会直接发送刷机包。")
