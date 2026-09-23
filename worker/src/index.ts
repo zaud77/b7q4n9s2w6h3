@@ -862,10 +862,6 @@ async function handleText(env: Env, update: any) {
 async function dispatchBuild(env: Env, query: any, session: Session) {
   const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   if (await activeBuild(env, userId)) { await editMessage(env, chatId, messageId, "当前正在构建内核，请等待本次构建完成。"); return; }
-  if (session.options?.ksu_type === "ksu" && session.options.susfs_enable === "true") {
-    await editMessage(env, chatId, messageId, "当前官方 KernelSU 与 SUSFS 集成补丁不兼容。请关闭 SUSFS，或改用 ReSukiSU、KernelSU Next、KowSU 后再构建。");
-    return;
-  }
   const serial = session.serial || ""; const workflowKey = session.workflow || "";
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await editMessage(env, chatId, messageId, "最终授权检查失败，未触发构建。"); return;

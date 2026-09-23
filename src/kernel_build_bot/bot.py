@@ -828,12 +828,6 @@ class KernelBuildBot:
             return
         serial = context.user_data.get("serial", "")
         workflow_key = context.user_data.get("workflow", "")
-        options = context.user_data.get("options") or defaults()
-        if options.get("ksu_type") == "ksu" and options.get("susfs_enable") == "true":
-            await query.edit_message_text(
-                "当前官方 KernelSU 与 SUSFS 集成补丁不兼容。请关闭 SUSFS，或改用 ReSukiSU、KernelSU Next、KowSU 后再构建。"
-            )
-            return
         owner_directed = bool(context.user_data.get("owner_directed_build"))
         serial_authorized = (
             self.is_admin(user_id) and owner_directed and self.db.serial_is_allowed(serial)
