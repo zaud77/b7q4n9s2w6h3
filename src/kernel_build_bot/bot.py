@@ -284,6 +284,7 @@ class KernelBuildBot:
             commands = [
                 BotCommand("start", "启动机器人"),
                 BotCommand("build", "构建绑定设备的内核"),
+                BotCommand("clear", "清除私聊记录和当前操作"),
                 BotCommand("buildfor", "为指定白名单序列号构建"),
                 BotCommand("allow", "添加白名单序列号"),
                 BotCommand("revoke", "撤销白名单序列号"),
@@ -295,11 +296,13 @@ class KernelBuildBot:
             commands = [
                 BotCommand("start", "启动机器人"),
                 BotCommand("build", "构建绑定设备的内核"),
+                BotCommand("clear", "清除私聊记录和当前操作"),
             ]
         else:
             commands = [
                 BotCommand("start", "验证序列号"),
                 BotCommand("join", "验证序列号并申请入群"),
+                BotCommand("clear", "清除私聊记录和当前操作"),
             ]
         try:
             await context.bot.set_my_commands(
@@ -331,6 +334,59 @@ class KernelBuildBot:
         await update.effective_message.reply_text(
             f"原加入申请已失效。请使用以下链接重新提交加入申请，机器人会自动批准：\n{invite_link}"
         )
+
+    async def clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        user = update.effective_user
+        chat = update.effective_chat
+        if not message or not user or not chat or chat.type != "private" or chat.id != user.id:
+            if message:
+                await message.reply_text("请在与机器人的私聊中使用 /clear。")
+            return
+
+        context.user_data.clear()
+        tracked = self.db.chat_messages_for_user(user.id, chat.id)
+        deleted = 0
+        failed = 0
+        for row in tracked:
+            try:
+                await context.bot.delete_message(chat.id, int(row["message_id"]))
+                deleted += 1
+            except Exception:
+                failed += 1
+        self.db.clear_chat_messages(user.id, chat.id)
+        suffix = f"；另有 {failed} 条消息未能删除" if failed else ""
+        await context.bot.send_message(
+            chat.id,
+            f"已清除当前操作和功能启用后记录的私聊消息（{deleted} 条）{suffix}。",
+        )
+
+    async def track_chat_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        user = update.effective_user
+        chat = update.effective_chat
+        if message and user and chat and chat.type == "private" and chat.id == user.id:
+            try:
+                self.db.track_chat_message(user.id, chat.id, message.message_id)
+            except Exception:
+                logging.exception("failed to track incoming private message")
+
+    def track_outgoing_messages(self, bot) -> None:
+        for method_name in ("send_message", "send_document"):
+            original = getattr(bot, method_name)
+
+            async def tracked(*args, _original=original, **kwargs):
+                message = await _original(*args, **kwargs)
+                if message.chat.type == "private":
+                    try:
+                        self.db.track_chat_message(
+                            message.chat.id, message.chat.id, message.message_id
+                        )
+                    except Exception:
+                        logging.exception("failed to track private chat message")
+                return message
+
+            setattr(bot, method_name, tracked)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
@@ -540,7 +596,7 @@ class KernelBuildBot:
             row = [
                 InlineKeyboardButton(
                     f"{'✅' if options[key] == 'true' else '⬜'} {BOOL_LABELS[key]}",
-                    callback_data=f"toggle:{key}",
+                    callback_data=f"set:{key}:{'false' if options[key] == 'true' else 'true'}",
                 )
                 for key in keys
                 if key != "self_config" or show_self_config
@@ -549,12 +605,15 @@ class KernelBuildBot:
                 rows.append(row)
         bbr_label = {"false": "关闭", "true": "开启", "default": "默认"}.get(options["bbr_enable"], options["bbr_enable"])
         droid_label = {"false": "关闭", "standard": "标准", "extend": "扩展"}.get(options["droidspaces_enable"], options["droidspaces_enable"])
+        ksu_next = KSU_VALUES[(KSU_VALUES.index(options["ksu_type"]) + 1) % len(KSU_VALUES)]
+        bbr_next = BBR_VALUES[(BBR_VALUES.index(options["bbr_enable"]) + 1) % len(BBR_VALUES)]
+        droid_next = DROID_VALUES[(DROID_VALUES.index(options["droidspaces_enable"]) + 1) % len(DROID_VALUES)]
         rows.extend(
             [
-                [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data="cycle:ksu_type")],
+                [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data=f"set:ksu_type:{ksu_next}")],
                 [
-                    InlineKeyboardButton(f"BBR：{bbr_label}", callback_data="cycle:bbr_enable"),
-                    InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data="cycle:droidspaces_enable"),
+                    InlineKeyboardButton(f"BBR：{bbr_label}", callback_data=f"set:bbr_enable:{bbr_next}"),
+                    InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data=f"set:droidspaces_enable:{droid_next}"),
                 ],
                 [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant"), InlineKeyboardButton("取消", callback_data="cancel")],
                 [InlineKeyboardButton("🚀 开始构建", callback_data="dispatch")],
@@ -566,7 +625,7 @@ class KernelBuildBot:
         query = update.callback_query
         await query.answer()
         data = query.data
-        quick_options_action = data.startswith(("toggle:", "cycle:"))
+        quick_options_action = data.startswith(("toggle:", "cycle:", "set:"))
         if (
             not self.is_admin(query.from_user.id)
             and not quick_options_action
@@ -713,7 +772,26 @@ class KernelBuildBot:
             return
         if options.get("ksu_type") == "kowx":
             options["ksu_type"] = "kowsu"
-        if data.startswith("toggle:"):
+        if data.startswith("set:"):
+            _, key, new_value = data.split(":", 2)
+            if key in BOOL_LABELS and new_value in {"false", "true"}:
+                if key == "self_config" and not self.is_admin(query.from_user.id):
+                    await query.edit_message_text("该配置仅限所有者使用。")
+                    return
+                options[key] = new_value
+                if new_value == "true" and key == "susfs_enable":
+                    options["nomount_enable"] = "false"
+                if new_value == "true" and key == "nomount_enable":
+                    options["susfs_enable"] = "false"
+            elif key == "ksu_type" and new_value in KSU_VALUES:
+                options[key] = new_value
+            elif key == "bbr_enable" and new_value in BBR_VALUES:
+                options[key] = new_value
+            elif key == "droidspaces_enable" and new_value in DROID_VALUES:
+                options[key] = new_value
+            else:
+                return
+        elif data.startswith("toggle:"):
             key = data.split(":", 1)[1]
             if key not in BOOL_LABELS:
                 return
@@ -750,6 +828,12 @@ class KernelBuildBot:
             return
         serial = context.user_data.get("serial", "")
         workflow_key = context.user_data.get("workflow", "")
+        options = context.user_data.get("options") or defaults()
+        if options.get("ksu_type") == "ksu" and options.get("susfs_enable") == "true":
+            await query.edit_message_text(
+                "当前官方 KernelSU 与 SUSFS 集成补丁不兼容。请关闭 SUSFS，或改用 ReSukiSU、KernelSU Next、KowSU 后再构建。"
+            )
+            return
         owner_directed = bool(context.user_data.get("owner_directed_build"))
         serial_authorized = (
             self.is_admin(user_id) and owner_directed and self.db.serial_is_allowed(serial)
@@ -864,13 +948,16 @@ class KernelBuildBot:
         }
 
     async def post_init(self, application: Application) -> None:
+        self.track_outgoing_messages(application.bot)
         public_commands = [
             BotCommand("start", "验证序列号"),
             BotCommand("join", "验证序列号并申请入群"),
+            BotCommand("clear", "清除私聊记录和当前操作"),
         ]
         owner_commands = [
             BotCommand("start", "启动机器人"),
             BotCommand("build", "构建绑定设备的内核"),
+            BotCommand("clear", "清除私聊记录和当前操作"),
             BotCommand("buildfor", "为指定白名单序列号构建"),
             BotCommand("allow", "添加白名单序列号"),
             BotCommand("revoke", "撤销白名单序列号"),
@@ -881,6 +968,7 @@ class KernelBuildBot:
         verified_commands = [
             BotCommand("start", "启动机器人"),
             BotCommand("build", "构建绑定设备的内核"),
+            BotCommand("clear", "清除私聊记录和当前操作"),
         ]
         await application.bot.set_my_commands(public_commands)
         for admin_user_id in self.settings.admin_user_ids:
@@ -1293,12 +1381,14 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("join", self.join))
         app.add_handler(CommandHandler("build", self.build))
+        app.add_handler(CommandHandler("clear", self.clear))
         app.add_handler(CommandHandler("buildfor", self.build_for))
         app.add_handler(CommandHandler("allow", self.allow))
         app.add_handler(CommandHandler("revoke", self.revoke))
         app.add_handler(CommandHandler("resetquota", self.reset_quota))
         app.add_handler(CommandHandler("allowed", self.allowed))
         app.add_handler(CommandHandler("joinlink", self.join_link))
+        app.add_handler(MessageHandler(filters.ALL, self.track_chat_message), group=-1)
         app.add_handler(MessageHandler(filters.COMMAND, self.unknown_command))
         app.add_handler(ChatJoinRequestHandler(self.join_request))
         app.add_handler(CallbackQueryHandler(self.callback))

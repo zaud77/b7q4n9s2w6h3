@@ -68,6 +68,15 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    telegram_user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (chat_id, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_user_chat
+                    ON chat_messages(telegram_user_id, chat_id, created_at);
                 CREATE TABLE IF NOT EXISTS quota_resets (
                     telegram_user_id INTEGER PRIMARY KEY,
                     reset_at INTEGER NOT NULL
@@ -240,6 +249,33 @@ class Database:
     def clear_pending_join(self, user_id: int) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM pending_joins WHERE telegram_user_id=?", (user_id,))
+
+    def track_chat_message(
+        self, user_id: int, chat_id: int, message_id: int, created_at: int | None = None
+    ) -> None:
+        timestamp = int(time.time()) if created_at is None else int(created_at)
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO chat_messages(telegram_user_id,chat_id,message_id,created_at) "
+                "VALUES(?,?,?,?)",
+                (user_id, chat_id, message_id, timestamp),
+            )
+            db.execute("DELETE FROM chat_messages WHERE created_at<?", (timestamp - 47 * 60 * 60,))
+
+    def chat_messages_for_user(self, user_id: int, chat_id: int) -> list[sqlite3.Row]:
+        with self._connect() as db:
+            return db.execute(
+                "SELECT message_id FROM chat_messages WHERE telegram_user_id=? AND chat_id=? "
+                "ORDER BY created_at DESC, message_id DESC",
+                (user_id, chat_id),
+            ).fetchall()
+
+    def clear_chat_messages(self, user_id: int, chat_id: int) -> None:
+        with self._connect() as db:
+            db.execute(
+                "DELETE FROM chat_messages WHERE telegram_user_id=? AND chat_id=?",
+                (user_id, chat_id),
+            )
 
     def seconds_until_allowed(self, user_id: int, cooldown: int) -> int:
         with self._connect() as db:

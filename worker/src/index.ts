@@ -31,18 +31,22 @@ type Session = {
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
-const COMMAND_MENU_REVISION = "commands:scoped-menus-v3";
+const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v4";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
+  { command: "clear", description: "清除私聊记录和当前操作" },
 ];
 const VERIFIED_COMMANDS = [
   { command: "start", description: "启动机器人" },
   { command: "build", description: "构建绑定设备的内核" },
+  { command: "clear", description: "清除私聊记录和当前操作" },
 ];
 const ADMIN_COMMANDS = [
   { command: "start", description: "启动机器人" },
   { command: "build", description: "构建绑定设备的内核" },
+  { command: "clear", description: "清除私聊记录和当前操作" },
   { command: "buildfor", description: "为指定白名单序列号构建" },
   { command: "allow", description: "添加白名单序列号" },
   { command: "revoke", description: "撤销白名单序列号" },
@@ -189,13 +193,57 @@ async function tg(env: Env, method: string, body: unknown): Promise<any> {
 }
 
 async function sendMessage(env: Env, chatId: number | string, text: string, replyMarkup?: unknown) {
-  return tg(env, "sendMessage", { chat_id: chatId, text, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+  const message = await tg(env, "sendMessage", { chat_id: chatId, text, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+  if (message.chat?.type === "private" && Number(message.chat.id) === Number(chatId)) {
+    try {
+      await trackPrivateChatMessage(env, Number(chatId), Number(chatId), Number(message.message_id));
+    } catch (error) {
+      console.error("track outgoing private message failed", String(error));
+    }
+  }
+  return message;
 }
 async function editMessage(env: Env, chatId: number | string, messageId: number, text: string, replyMarkup?: unknown) {
   return tg(env, "editMessageText", { chat_id: chatId, message_id: messageId, text, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
 }
 async function answerCallback(env: Env, id: string, text?: string, showAlert = false) {
   return tg(env, "answerCallbackQuery", { callback_query_id: id, ...(text ? { text, show_alert: showAlert } : {}) });
+}
+
+async function trackPrivateChatMessage(env: Env, userId: number, chatId: number, messageId: number) {
+  if (userId !== chatId || !Number.isFinite(messageId)) return;
+  const timestamp = now();
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO chat_messages(telegram_user_id,chat_id,message_id,created_at) VALUES(?,?,?,?)"
+  ).bind(userId, chatId, messageId, timestamp).run();
+  await env.DB.prepare("DELETE FROM chat_messages WHERE created_at<?").bind(timestamp - 47 * 60 * 60).run();
+}
+
+async function clearPrivateChat(env: Env, message: any) {
+  const userId = Number(message.from?.id);
+  const chatId = Number(message.chat?.id);
+  if (message.chat?.type !== "private" || !Number.isFinite(userId) || chatId !== userId) {
+    await sendMessage(env, message.chat.id, "请在与机器人的私聊中使用 /clear。");
+    return;
+  }
+
+  await clearSession(env, userId);
+  const records: any = await env.DB.prepare(
+    "SELECT message_id FROM chat_messages WHERE telegram_user_id=? AND chat_id=? ORDER BY created_at DESC,message_id DESC"
+  ).bind(userId, chatId).all();
+  let deleted = 0;
+  let failed = 0;
+  for (const row of records.results || []) {
+    try {
+      await tg(env, "deleteMessage", { chat_id: chatId, message_id: Number(row.message_id) });
+      deleted++;
+    } catch {
+      failed++;
+    }
+  }
+  await env.DB.prepare("DELETE FROM chat_messages WHERE telegram_user_id=? AND chat_id=?").bind(userId, chatId).run();
+  const suffix = failed ? `；另有 ${failed} 条消息未能删除` : "";
+  await sendMessage(env, chatId, `已清除当前操作和功能启用后记录的私聊消息（${deleted} 条）${suffix}。`);
 }
 
 async function setUserCommands(env: Env, userId: number, bound: boolean): Promise<boolean> {
@@ -465,6 +513,23 @@ async function applyQuotaMigration(env: Env): Promise<string> {
   return QUOTA_MIGRATION_KEY;
 }
 
+async function applyChatHistoryMigration(env: Env): Promise<string> {
+  const marker: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?").bind(CHAT_HISTORY_MIGRATION_KEY).first();
+  if (marker?.value === "done") return CHAT_HISTORY_MIGRATION_KEY;
+  await env.DB.batch([
+    env.DB.prepare(
+      "CREATE TABLE IF NOT EXISTS chat_messages (telegram_user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(chat_id,message_id))"
+    ),
+    env.DB.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_chat_messages_user_chat ON chat_messages(telegram_user_id,chat_id,created_at)"
+    ),
+    env.DB.prepare(
+      "INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+    ).bind(CHAT_HISTORY_MIGRATION_KEY),
+  ]);
+  return CHAT_HISTORY_MIGRATION_KEY;
+}
+
 function beijingDayBounds(timestamp: number): [number, number] {
   const shifted = timestamp + 8 * 3600;
   const start = Math.floor(shifted / 86400) * 86400 - 8 * 3600;
@@ -497,20 +562,91 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
       .filter(key => key !== "self_config" || showSelf)
       .map(key => ({
         text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
-        callback_data: `toggle:${key}`,
+        callback_data: `set:${key}:${options[key] === "true" ? "false" : "true"}`,
       }));
     if (row.length) rows.push(row);
   }
-  rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: "cycle:ksu_type" }]);
   const bbrLabel: Record<string, string> = { false: "关闭", true: "开启", default: "默认" };
   const droidLabel: Record<string, string> = { false: "关闭", standard: "标准", extend: "扩展" };
+  const nextValue = (values: string[], current: string) => values[(values.indexOf(current) + 1) % values.length];
+  rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: `set:ksu_type:${nextValue(KSU_VALUES, options.ksu_type)}` }]);
   rows.push([
-    { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: "cycle:bbr_enable" },
-    { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" },
+    { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: `set:bbr_enable:${nextValue(["false", "true", "default"], options.bbr_enable)}` },
+    { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: `set:droidspaces_enable:${nextValue(["false", "standard", "extend"], options.droidspaces_enable)}` },
   ]);
   rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }, { text: "取消", callback_data: "cancel" }]);
   rows.push([{ text: "🚀 开始构建", callback_data: "dispatch" }]);
   return { inline_keyboard: rows };
+}
+
+function optimisticOptionsMarkup(query: any, data: string): any | null {
+  const [, key, value] = data.split(":", 3);
+  const markup = query.message?.reply_markup;
+  if (!key || value == null || !markup?.inline_keyboard) return null;
+  const copy = JSON.parse(JSON.stringify(markup));
+  const button = copy.inline_keyboard.flat().find((item: any) => item.callback_data === data);
+  if (!button) return null;
+  const setButton = (target: any, option: string, next: string) => {
+    if (BOOL_LABELS[option]) {
+      target.text = `${next === "true" ? "✅" : "⬜"} ${BOOL_LABELS[option]}`;
+      target.callback_data = `set:${option}:${next === "true" ? "false" : "true"}`;
+      return true;
+    }
+    if (option === "ksu_type" && KSU_VALUES.includes(next)) {
+      target.text = `KernelSU：${KSU_LABELS[next]}`;
+      target.callback_data = `set:${option}:${KSU_VALUES[(KSU_VALUES.indexOf(next) + 1) % KSU_VALUES.length]}`;
+      return true;
+    }
+    const cycleLabels: Record<string, Record<string, string>> = {
+      bbr_enable: { false: "关闭", true: "开启", default: "默认" },
+      droidspaces_enable: { false: "关闭", standard: "标准", extend: "扩展" },
+    };
+    const values: Record<string, string[]> = {
+      bbr_enable: ["false", "true", "default"],
+      droidspaces_enable: ["false", "standard", "extend"],
+    };
+    if (values[option]?.includes(next)) {
+      const prefix = option === "bbr_enable" ? "BBR" : "Droidspaces";
+      target.text = `${prefix}：${cycleLabels[option][next]}`;
+      const choices = values[option];
+      target.callback_data = `set:${option}:${choices[(choices.indexOf(next) + 1) % choices.length]}`;
+      return true;
+    }
+    return false;
+  };
+  if (!setButton(button, key, value)) return null;
+  if ((key === "susfs_enable" || key === "nomount_enable") && value === "true") {
+    const other = key === "susfs_enable" ? "nomount_enable" : "susfs_enable";
+    const otherButton = copy.inline_keyboard.flat().find((item: any) => String(item.callback_data || "").startsWith(`set:${other}:`));
+    if (otherButton) setButton(otherButton, other, "false");
+  }
+  return copy;
+}
+
+async function persistQuickOption(env: Env, userId: number, data: string, admin: boolean): Promise<boolean> {
+  const [, key, value] = data.split(":", 3);
+  if (!key || value == null) return false;
+  let allowedValues: string[];
+  if (BOOL_LABELS[key]) {
+    allowedValues = ["false", "true"];
+    if (key === "self_config" && !admin) return false;
+  } else if (key === "ksu_type") allowedValues = KSU_VALUES;
+  else if (key === "bbr_enable") allowedValues = ["false", "true", "default"];
+  else if (key === "droidspaces_enable") allowedValues = ["false", "standard", "extend"];
+  else return false;
+  if (!allowedValues.includes(value)) return false;
+
+  const fields: Array<[string, string]> = [[key, value]];
+  if (value === "true" && key === "susfs_enable") fields.push(["nomount_enable", "false"]);
+  if (value === "true" && key === "nomount_enable") fields.push(["susfs_enable", "false"]);
+  const jsonArgs = fields.map(() => "?, ?").join(", ");
+  const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.${name}`, next]);
+  params.push(now(), userId);
+  const selfConfigGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p')" : "";
+  const result: any = await env.DB.prepare(
+    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${selfConfigGuard}`
+  ).bind(...params).run();
+  return Number(result.meta?.changes || 0) > 0;
 }
 function workflowMarkup() {
   const rows = Object.entries(SCRIPTS).map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
@@ -555,6 +691,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
   const message = update.message;
   const userId = message.from.id;
   const chatId = message.chat.id;
+  if (command === "clear") { await clearPrivateChat(env, message); return; }
   if (await rejectWhileBuilding(env, update)) return;
   const boundSerial = await serialForUser(env, userId);
   if (command !== "start" && command !== "join" && !isAdmin(env, userId) && !boundSerial) {
@@ -725,6 +862,10 @@ async function handleText(env: Env, update: any) {
 async function dispatchBuild(env: Env, query: any, session: Session) {
   const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   if (await activeBuild(env, userId)) { await editMessage(env, chatId, messageId, "当前正在构建内核，请等待本次构建完成。"); return; }
+  if (session.options?.ksu_type === "ksu" && session.options.susfs_enable === "true") {
+    await editMessage(env, chatId, messageId, "当前官方 KernelSU 与 SUSFS 集成补丁不兼容。请关闭 SUSFS，或改用 ReSukiSU、KernelSU Next、KowSU 后再构建。");
+    return;
+  }
   const serial = session.serial || ""; const workflowKey = session.workflow || "";
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await editMessage(env, chatId, messageId, "最终授权检查失败，未触发构建。"); return;
@@ -780,6 +921,23 @@ async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   await answerCallback(env, query.id);
   const data = query.data || "";
+  if (data.startsWith("set:")) {
+    const [, key] = data.split(":", 3);
+    if (key === "self_config" && !isAdmin(env, userId)) {
+      await editMessage(env, chatId, messageId, "该配置仅限所有者使用。");
+      return;
+    }
+    const optimistic = optimisticOptionsMarkup(query, data);
+    if (!optimistic) {
+      await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。");
+      return;
+    }
+    await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optimistic });
+    if (!(await persistQuickOption(env, userId, data, isAdmin(env, userId)))) {
+      await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。");
+    }
+    return;
+  }
   const quickOptionsAction = data.startsWith("toggle:") || data.startsWith("cycle:");
   const dispatchAction = data === "dispatch";
   if (!quickOptionsAction && !dispatchAction && !(await serialForUser(env, userId)) && !isAdmin(env, userId)) {
@@ -936,6 +1094,13 @@ async function handleUpdate(env: Env, update: any) {
   if (update.chat_join_request) return handleJoinRequest(env, update);
   if (update.callback_query) return handleCallback(env, update);
   const message = update.message; if (!message) return;
+  if (message.chat?.type === "private" && Number(message.chat.id) === Number(message.from?.id)) {
+    try {
+      await trackPrivateChatMessage(env, Number(message.from.id), Number(message.chat.id), Number(message.message_id));
+    } catch (error) {
+      console.error("track incoming private message failed", String(error));
+    }
+  }
   if (message.document) return handleDocument(env, update);
   const text = String(message.text || "");
   if (text.startsWith("/")) {
@@ -958,6 +1123,14 @@ async function sendDocument(env: Env, chatId: number, filename: string, bytes: U
   if (caption) form.set("caption", caption);
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: form });
   if (!response.ok) throw new Error(`sendDocument ${response.status}: ${await response.text()}`);
+  const result: any = await response.json();
+  if (result.ok && result.result?.chat?.type === "private" && Number(result.result.chat.id) === Number(chatId)) {
+    try {
+      await trackPrivateChatMessage(env, Number(chatId), Number(chatId), Number(result.result.message_id));
+    } catch (error) {
+      console.error("track outgoing private document failed", String(error));
+    }
+  }
 }
 function unwrapArtifact(bytes: Uint8Array, pattern: RegExp): { name: string; bytes: Uint8Array } | null {
   const files = unzipSync(bytes); const matches = Object.entries(files).filter(([name]) => pattern.test(name.split("/").pop() || ""));
@@ -1061,9 +1234,10 @@ export default {
     const url = new URL(request.url);
     const dataMigration = await applyDataMigrations(env);
     const quotaMigration = await applyQuotaMigration(env);
+    const chatHistoryMigration = await applyChatHistoryMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, commandMenus });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, commandMenus });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
@@ -1090,6 +1264,7 @@ export default {
     ctx.waitUntil((async () => {
       await applyDataMigrations(env);
       await applyQuotaMigration(env);
+      await applyChatHistoryMigration(env);
       await monitorBuilds(env);
     })());
   },

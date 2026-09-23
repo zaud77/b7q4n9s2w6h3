@@ -15,6 +15,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS chat_messages (
+  telegram_user_id INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_chat
+  ON chat_messages(telegram_user_id, chat_id, created_at);
+
 CREATE TABLE IF NOT EXISTS pending_joins (
   telegram_user_id INTEGER PRIMARY KEY,
   user_chat_id INTEGER NOT NULL,
