@@ -115,15 +115,6 @@ BOOL_LABELS = {
     "rekernel_enable": "Re-Kernel",
     "baseband_guard": "基带保护",
 }
-BOOL_OPTION_ROWS = (
-    ("susfs_enable", "nomount_enable"),
-    ("kpm_enable", "lz4_enable"),
-    ("lz4kd_enable", "unicode_enable"),
-    ("better_net", "adios_enable"),
-    ("rekernel_enable", "baseband_guard"),
-    ("self_config",),
-)
-
 KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
 KSU_LABELS = {
     "resukisu": "ReSukiSU",
@@ -179,14 +170,6 @@ def defaults() -> dict[str, str]:
     return values
 
 
-def visible_bool_option_rows(show_self_config: bool) -> list[tuple[str, ...]]:
-    rows = [
-        tuple(key for key in row if key != "self_config" or show_self_config)
-        for row in BOOL_OPTION_ROWS
-    ]
-    return [row for row in rows if row]
-
-
 def options_prompt(workflow_key: str, prefix: str = "已选择") -> str:
     return (
         f"{prefix}：{WORKFLOWS[workflow_key][0]}\n"
@@ -227,10 +210,8 @@ def variant_markup(
 ) -> InlineKeyboardMarkup:
     variants = SCRIPTS[script_key][1]
     keyboard = [
-        [
-            InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")
-            for variant_key, (label, _) in variants.items()
-        ]
+        [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
+        for variant_key, (label, _) in variants.items()
     ]
     if show_bind:
         keyboard.append(
@@ -546,35 +527,33 @@ class KernelBuildBot:
             return
 
     def options_markup(self, options: dict[str, str], show_self_config: bool) -> InlineKeyboardMarkup:
-        rows = [
-            [
-                InlineKeyboardButton(
-                    f"{'✅' if options[key] == 'true' else '⬜'} {BOOL_LABELS[key]}",
-                    callback_data=f"toggle:{key}",
-                )
-                for key in option_row
-            ]
-            for option_row in visible_bool_option_rows(show_self_config)
-        ]
+        rows = []
+        for key, label in BOOL_LABELS.items():
+            if key == "self_config" and not show_self_config:
+                continue
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"{'✅' if options[key] == 'true' else '⬜'} {label}",
+                        callback_data=f"toggle:{key}",
+                    )
+                ]
+            )
         bbr_label = {"false": "关闭", "true": "开启", "default": "默认"}.get(options["bbr_enable"], options["bbr_enable"])
         droid_label = {"false": "关闭", "standard": "标准", "extend": "扩展"}.get(options["droidspaces_enable"], options["droidspaces_enable"])
         rows.extend(
             [
                 [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data="cycle:ksu_type")],
-                [
-                    InlineKeyboardButton(f"BBR：{bbr_label}", callback_data="cycle:bbr_enable"),
-                    InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data="cycle:droidspaces_enable"),
-                ],
-                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant"), InlineKeyboardButton("取消", callback_data="cancel")],
-                [InlineKeyboardButton("🚀 开始构建", callback_data="dispatch")],
+                [InlineKeyboardButton(f"BBR/Brutal：{bbr_label}", callback_data="cycle:bbr_enable")],
+                [InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data="cycle:droidspaces_enable")],
+                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant")],
+                [InlineKeyboardButton("开始构建", callback_data="dispatch"), InlineKeyboardButton("取消", callback_data="cancel")],
             ]
         )
         return InlineKeyboardMarkup(rows)
 
     async def callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
-        if await self.reject_while_building(update):
-            return
         await query.answer()
         if not self.is_admin(query.from_user.id) and not self.db.serial_for_user(query.from_user.id):
             await self.sync_user_commands(context, query.from_user.id, False)
@@ -614,7 +593,7 @@ class KernelBuildBot:
         if data.startswith("bind:"):
             script_key = data.split(":", 1)[1]
             if self.is_admin(query.from_user.id):
-                await query.answer("所有者无需绑定脚本", show_alert=True)
+                await query.edit_message_text("所有者无需绑定脚本。")
                 return
             if (
                 script_key not in SCRIPTS
@@ -625,7 +604,7 @@ class KernelBuildBot:
                 return
             bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
             if bound_script and bound_script != script_key:
-                await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                await query.edit_message_text("该账号已绑定其他构建脚本。")
                 return
             bound_script = normalize_workflow_key(self.db.bind_workflow(query.from_user.id, script_key))
             await query.edit_message_text(
@@ -639,13 +618,13 @@ class KernelBuildBot:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
                 return
             if not SCRIPTS[key][1] and self.db.workflow_maintenance(key):
-                await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
+                await query.edit_message_text("该内核正在建立持久缓存，请稍后再试。")
                 return
             bound_script = None
             if not self.is_admin(query.from_user.id):
                 bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
                 if bound_script and bound_script != key:
-                    await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                    await query.edit_message_text("该账号已绑定其他构建脚本。")
                     return
             variants = SCRIPTS[key][1]
             context.user_data["options"] = defaults()
@@ -681,13 +660,13 @@ class KernelBuildBot:
             if not self.is_admin(query.from_user.id):
                 bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
                 if not bound_script:
-                    await query.answer("请先点击“绑定此脚本”", show_alert=True)
+                    await query.edit_message_text("请先点击“绑定此脚本”。")
                     return
                 if bound_script != script_key:
-                    await query.answer("该账号已绑定其他构建脚本", show_alert=True)
+                    await query.edit_message_text("该账号已绑定其他构建脚本。")
                     return
             if self.db.workflow_maintenance(workflow_key):
-                await query.answer("该内核正在建立持久缓存，请稍后再试", show_alert=True)
+                await query.edit_message_text("该内核正在建立持久缓存，请稍后再试。")
                 return
             context.user_data["workflow"] = workflow_key
             apply_workflow_defaults(workflow_key, context.user_data["options"])
@@ -721,7 +700,7 @@ class KernelBuildBot:
                 return
             if key == "self_config" and not self.is_admin(query.from_user.id):
                 options["self_config"] = "false"
-                await query.answer("该配置仅限所有者使用", show_alert=True)
+                await query.edit_message_text("该配置仅限所有者使用。")
                 return
             new_value = "false" if options[key] == "true" else "true"
             options[key] = new_value
@@ -748,7 +727,7 @@ class KernelBuildBot:
     async def dispatch(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = query.from_user.id
         if self.db.has_active_build_job(user_id):
-            await query.answer("当前正在构建内核，请等待本次构建完成。", show_alert=True)
+            await query.edit_message_text("当前正在构建内核，请等待本次构建完成。")
             return
         serial = context.user_data.get("serial", "")
         workflow_key = context.user_data.get("workflow", "")
@@ -771,15 +750,14 @@ class KernelBuildBot:
         if not self.is_admin(user_id):
             wait = self.db.seconds_until_allowed(user_id, self.settings.cooldown_seconds)
             if wait:
-                await query.answer(f"请在 {wait} 秒后再构建", show_alert=True)
+                await query.edit_message_text(f"请在 {wait} 秒后再构建。")
                 return
         if (
             not self.is_admin(user_id)
             and self.daily_build_count(user_id) >= self.settings.daily_build_limit
         ):
-            await query.answer(
-                f"今天已达到 {self.settings.daily_build_limit} 次构建上限",
-                show_alert=True,
+            await query.edit_message_text(
+                f"今天已达到 {self.settings.daily_build_limit} 次构建上限。"
             )
             return
         if workflow_key not in WORKFLOWS:

@@ -226,11 +226,9 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     assert any("自用配置" in label for label in owner_labels)
     assert any("上一步" in label for label in public_labels)
     assert not any("zarm" in label.lower() for label in owner_labels)
-    assert any(
-        len(row) == 2 and row[0].text.endswith("SUSFS") and row[1].text.endswith("NoMount")
-        for row in public_markup.inline_keyboard
-    )
-    assert public_markup.inline_keyboard[-1][0].text == "🚀 开始构建"
+    assert all(len(row) == 1 for row in public_markup.inline_keyboard[:-1])
+    assert [button.text for button in public_markup.inline_keyboard[-1]] == ["开始构建", "取消"]
+    assert all(len(row) == 1 for row in variant_markup("623").inline_keyboard[:2])
     assert "SUSFS 与 NoMount 自动互斥" in options_prompt("623g")
 
 

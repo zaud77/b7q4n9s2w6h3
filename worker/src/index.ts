@@ -114,14 +114,6 @@ const BOOL_LABELS: Record<string, string> = {
   rekernel_enable: "Re-Kernel",
   baseband_guard: "基带保护",
 };
-const BOOL_OPTION_ROWS = [
-  ["susfs_enable", "nomount_enable"],
-  ["kpm_enable", "lz4_enable"],
-  ["lz4kd_enable", "unicode_enable"],
-  ["better_net", "adios_enable"],
-  ["rekernel_enable", "baseband_guard"],
-  ["self_config"],
-] as const;
 const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
   resukisu: "ReSukiSU",
@@ -492,24 +484,17 @@ async function resetSerialQuota(env: Env, serial: string): Promise<number | null
 
 function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
   const rows: any[] = [];
-  for (const keys of BOOL_OPTION_ROWS) {
-    const row = keys
-      .filter(key => key !== "self_config" || showSelf)
-      .map(key => ({
-        text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
-        callback_data: `toggle:${key}`,
-      }));
-    if (row.length) rows.push(row);
+  for (const [key, label] of Object.entries(BOOL_LABELS)) {
+    if (key === "self_config" && !showSelf) continue;
+    rows.push([{ text: `${options[key] === "true" ? "✅" : "⬜"} ${label}`, callback_data: `toggle:${key}` }]);
   }
   rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: "cycle:ksu_type" }]);
   const bbrLabel: Record<string, string> = { false: "关闭", true: "开启", default: "默认" };
   const droidLabel: Record<string, string> = { false: "关闭", standard: "标准", extend: "扩展" };
-  rows.push([
-    { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: "cycle:bbr_enable" },
-    { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" },
-  ]);
-  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }, { text: "取消", callback_data: "cancel" }]);
-  rows.push([{ text: "🚀 开始构建", callback_data: "dispatch" }]);
+  rows.push([{ text: `BBR/Brutal：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: "cycle:bbr_enable" }]);
+  rows.push([{ text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" }]);
+  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }]);
+  rows.push([{ text: "开始构建", callback_data: "dispatch" }, { text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
 function workflowMarkup() {
@@ -519,7 +504,7 @@ function workflowMarkup() {
 }
 function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
   const variants = SCRIPTS[scriptKey][1]!;
-  const rows = [Object.entries(variants).map(([key, value]) => ({ text: value[0], callback_data: `variant:${scriptKey}:${key}` }))];
+  const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
   if (showBind) rows.push([{ text: "🔒 绑定此脚本", callback_data: `bind:${scriptKey}` }]);
   if (showBack) rows.push([{ text: "⬅️ 上一步", callback_data: "back:scripts" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
@@ -724,7 +709,7 @@ async function handleText(env: Env, update: any) {
 
 async function dispatchBuild(env: Env, query: any, session: Session) {
   const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
-  if (await activeBuild(env, userId)) { await answerCallback(env, query.id, "当前正在构建内核，请等待本次构建完成。", true); return; }
+  if (await activeBuild(env, userId)) { await editMessage(env, chatId, messageId, "当前正在构建内核，请等待本次构建完成。"); return; }
   const serial = session.serial || ""; const workflowKey = session.workflow || "";
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await editMessage(env, chatId, messageId, "最终授权检查失败，未触发构建。"); return;
@@ -778,7 +763,6 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
 
 async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
-  if (await rejectWhileBuilding(env, update)) return;
   await answerCallback(env, query.id);
   if (!(await serialForUser(env, userId)) && !isAdmin(env, userId)) {
     await setUserCommands(env, userId, false);
@@ -811,12 +795,12 @@ async function handleCallback(env: Env, update: any) {
   }
   if (data.startsWith("bind:")) {
     const scriptKey = data.slice(5);
-    if (isAdmin(env, userId)) { await answerCallback(env, query.id, "所有者无需绑定脚本", true); return; }
+    if (isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "所有者无需绑定脚本。"); return; }
     if (!SCRIPTS[scriptKey] || session.selectedScript !== scriptKey || !session.serial) {
       await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return;
     }
     const current = await workflowForUser(env, userId);
-    if (current && current !== scriptKey) { await answerCallback(env, query.id, "该账号已绑定其他构建脚本", true); return; }
+    if (current && current !== scriptKey) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     const boundScript = await bindWorkflow(env, userId, scriptKey);
     await editMessage(env, chatId, messageId, `已绑定：${SCRIPTS[boundScript][0]}\n请选择风驰版本：`, variantMarkup(boundScript, false, false));
     return;
@@ -825,7 +809,7 @@ async function handleCallback(env: Env, update: any) {
     const key = data.slice(7);
     if (!SCRIPTS[key] || !session.serial) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
     const boundScript = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
-    if (boundScript && boundScript !== key) { await answerCallback(env, query.id, "该账号已绑定其他构建脚本", true); return; }
+    if (boundScript && boundScript !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     const variants = SCRIPTS[key][1];
     session.options = defaults(); session.selectedScript = key;
     if (variants) {
@@ -834,7 +818,7 @@ async function handleCallback(env: Env, update: any) {
       await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key, isAdmin(env, userId) || !boundScript, !isAdmin(env, userId) && !boundScript));
       return;
     }
-    if (await workflowMaintenance(env, key)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
+    if (await workflowMaintenance(env, key)) { await editMessage(env, chatId, messageId, "该内核正在建立持久缓存，请稍后再试。"); return; }
     session.workflow = key; session.options ||= defaults();
     applyWorkflowDefaults(key, session.options);
     await setSession(env, userId, session);
@@ -847,10 +831,10 @@ async function handleCallback(env: Env, update: any) {
     const workflowKey = variants[variantKey][1];
     if (!isAdmin(env, userId)) {
       const boundScript = await workflowForUser(env, userId);
-      if (!boundScript) { await answerCallback(env, query.id, "请先点击“绑定此脚本”", true); return; }
-      if (boundScript !== scriptKey) { await answerCallback(env, query.id, "该账号已绑定其他构建脚本", true); return; }
+      if (!boundScript) { await editMessage(env, chatId, messageId, "请先点击“绑定此脚本”。"); return; }
+      if (boundScript !== scriptKey) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     }
-    if (await workflowMaintenance(env, workflowKey)) { await answerCallback(env, query.id, "该内核正在建立持久缓存，请稍后再试", true); return; }
+    if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, "该内核正在建立持久缓存，请稍后再试。"); return; }
     session.workflow = workflowKey; session.options ||= defaults();
     applyWorkflowDefaults(workflowKey, session.options);
     await setSession(env, userId, session);
@@ -871,7 +855,7 @@ async function handleCallback(env: Env, update: any) {
   delete options.zarm_tool;
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
-    if (key === "self_config" && !isAdmin(env, userId)) { await answerCallback(env, query.id, "该配置仅限所有者使用", true); return; }
+    if (key === "self_config" && !isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "该配置仅限所有者使用。"); return; }
     const value = options[key] === "true" ? "false" : "true";
     options[key] = value;
     if (value === "true" && key === "susfs_enable") options.nomount_enable = "false";
