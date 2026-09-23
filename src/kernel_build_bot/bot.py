@@ -109,13 +109,20 @@ BOOL_LABELS = {
     "kpm_enable": "KPM / KPatch Next",
     "lz4_enable": "LZ4 + Zstd",
     "lz4kd_enable": "LZ4KD",
-    "zarm_tool": "zarm 工具",
     "unicode_enable": "Unicode 修复",
     "better_net": "网络增强",
     "adios_enable": "ADIOS",
     "rekernel_enable": "Re-Kernel",
     "baseband_guard": "基带保护",
 }
+BOOL_OPTION_ROWS = (
+    ("susfs_enable", "nomount_enable"),
+    ("kpm_enable", "lz4_enable"),
+    ("lz4kd_enable", "unicode_enable"),
+    ("better_net", "adios_enable"),
+    ("rekernel_enable", "baseband_guard"),
+    ("self_config",),
+)
 
 KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
 KSU_LABELS = {
@@ -172,6 +179,21 @@ def defaults() -> dict[str, str]:
     return values
 
 
+def visible_bool_option_rows(show_self_config: bool) -> list[tuple[str, ...]]:
+    rows = [
+        tuple(key for key in row if key != "self_config" or show_self_config)
+        for row in BOOL_OPTION_ROWS
+    ]
+    return [row for row in rows if row]
+
+
+def options_prompt(workflow_key: str, prefix: str = "已选择") -> str:
+    return (
+        f"{prefix}：{WORKFLOWS[workflow_key][0]}\n"
+        "勾选项为开启；SUSFS 与 NoMount 自动互斥。"
+    )
+
+
 def apply_workflow_defaults(workflow_key: str, options: dict[str, str]) -> dict[str, str]:
     if workflow_key in ONEPLUS_15T_WORKFLOW_KEYS:
         options["lz4_enable"] = "false"
@@ -205,8 +227,10 @@ def variant_markup(
 ) -> InlineKeyboardMarkup:
     variants = SCRIPTS[script_key][1]
     keyboard = [
-        [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
-        for variant_key, (label, _) in variants.items()
+        [
+            InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")
+            for variant_key, (label, _) in variants.items()
+        ]
     ]
     if show_bind:
         keyboard.append(
@@ -427,7 +451,7 @@ class KernelBuildBot:
             await update.effective_message.reply_text(
                 f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择风驰版本："
                 if variants
-                else f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择功能：",
+                else options_prompt(bound_workflow, "已绑定"),
                 reply_markup=(
                     variant_markup(bound_workflow, show_back=self.is_admin(user.id))
                     if variants
@@ -522,19 +546,27 @@ class KernelBuildBot:
             return
 
     def options_markup(self, options: dict[str, str], show_self_config: bool) -> InlineKeyboardMarkup:
-        rows = []
-        for key, label in BOOL_LABELS.items():
-            if key == "self_config" and not show_self_config:
-                continue
-            mark = "✅" if options[key] == "true" else "⬜"
-            rows.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"toggle:{key}")])
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if options[key] == 'true' else '⬜'} {BOOL_LABELS[key]}",
+                    callback_data=f"toggle:{key}",
+                )
+                for key in option_row
+            ]
+            for option_row in visible_bool_option_rows(show_self_config)
+        ]
+        bbr_label = {"false": "关闭", "true": "开启", "default": "默认"}.get(options["bbr_enable"], options["bbr_enable"])
+        droid_label = {"false": "关闭", "standard": "标准", "extend": "扩展"}.get(options["droidspaces_enable"], options["droidspaces_enable"])
         rows.extend(
             [
                 [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data="cycle:ksu_type")],
-                [InlineKeyboardButton(f"BBR/Brutal：{options['bbr_enable']}", callback_data="cycle:bbr_enable")],
-                [InlineKeyboardButton(f"Droidspaces：{options['droidspaces_enable']}", callback_data="cycle:droidspaces_enable")],
-                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant")],
-                [InlineKeyboardButton("开始构建", callback_data="dispatch"), InlineKeyboardButton("取消", callback_data="cancel")],
+                [
+                    InlineKeyboardButton(f"BBR：{bbr_label}", callback_data="cycle:bbr_enable"),
+                    InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data="cycle:droidspaces_enable"),
+                ],
+                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant"), InlineKeyboardButton("取消", callback_data="cancel")],
+                [InlineKeyboardButton("🚀 开始构建", callback_data="dispatch")],
             ]
         )
         return InlineKeyboardMarkup(rows)
@@ -632,7 +664,7 @@ class KernelBuildBot:
             context.user_data["workflow"] = key
             apply_workflow_defaults(key, context.user_data["options"])
             await query.edit_message_text(
-                f"已选择：{WORKFLOWS[key][0]}\n继续选择功能：",
+                options_prompt(key),
                 reply_markup=self.options_markup(
                     context.user_data["options"],
                     self.is_admin(query.from_user.id) and supports_self_config(key),
@@ -660,7 +692,7 @@ class KernelBuildBot:
             context.user_data["workflow"] = workflow_key
             apply_workflow_defaults(workflow_key, context.user_data["options"])
             await query.edit_message_text(
-                f"已选择：{WORKFLOWS[workflow_key][0]}\n继续选择功能：",
+                options_prompt(workflow_key),
                 reply_markup=self.options_markup(
                     context.user_data["options"],
                     self.is_admin(query.from_user.id) and supports_self_config(workflow_key),
@@ -692,16 +724,11 @@ class KernelBuildBot:
                 await query.answer("该配置仅限所有者使用", show_alert=True)
                 return
             new_value = "false" if options[key] == "true" else "true"
-            if key == "zarm_tool" and new_value == "true" and options["lz4kd_enable"] != "true":
-                await query.answer("请先开启 LZ4KD", show_alert=True)
-                return
             options[key] = new_value
             if new_value == "true" and key == "susfs_enable":
                 options["nomount_enable"] = "false"
             if new_value == "true" and key == "nomount_enable":
                 options["susfs_enable"] = "false"
-            if key == "lz4kd_enable" and new_value == "false":
-                options["zarm_tool"] = "false"
         elif data.startswith("cycle:"):
             key = data.split(":", 1)[1]
             choices = {"ksu_type": KSU_VALUES, "bbr_enable": BBR_VALUES, "droidspaces_enable": DROID_VALUES}.get(key)
@@ -772,6 +799,7 @@ class KernelBuildBot:
             return
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
+        inputs.pop("zarm_tool", None)
         if inputs.get("ksu_type") == "kowx":
             inputs["ksu_type"] = "kowsu"
         if not supports_self_config(workflow_key):

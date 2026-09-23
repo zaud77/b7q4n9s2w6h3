@@ -6,6 +6,7 @@ from kernel_build_bot.bot import (
     defaults,
     is_kowsu_selection,
     normalize_workflow_key,
+    options_prompt,
     parse_whitelist,
     variant_markup,
     supports_self_config,
@@ -224,6 +225,13 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     assert not any("自用配置" in label for label in public_labels)
     assert any("自用配置" in label for label in owner_labels)
     assert any("上一步" in label for label in public_labels)
+    assert not any("zarm" in label.lower() for label in owner_labels)
+    assert any(
+        len(row) == 2 and row[0].text.endswith("SUSFS") and row[1].text.endswith("NoMount")
+        for row in public_markup.inline_keyboard
+    )
+    assert public_markup.inline_keyboard[-1][0].text == "🚀 开始构建"
+    assert "SUSFS 与 NoMount 自动互斥" in options_prompt("623g")
 
 
 def test_variant_back_button_can_be_hidden_for_bound_users():
@@ -250,3 +258,5 @@ def test_variant_bind_button_is_only_shown_before_binding():
     ]
     assert any("绑定此脚本" in label for label in before_binding)
     assert not any("绑定此脚本" in label for label in after_binding)
+    variant_row = variant_markup("623", show_back=False, show_bind=False).inline_keyboard[0]
+    assert [button.text for button in variant_row] == ["金标", "紫标"]

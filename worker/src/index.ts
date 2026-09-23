@@ -108,13 +108,20 @@ const BOOL_LABELS: Record<string, string> = {
   kpm_enable: "KPM / KPatch Next",
   lz4_enable: "LZ4 + Zstd",
   lz4kd_enable: "LZ4KD",
-  zarm_tool: "zarm 工具",
   unicode_enable: "Unicode 修复",
   better_net: "网络增强",
   adios_enable: "ADIOS",
   rekernel_enable: "Re-Kernel",
   baseband_guard: "基带保护",
 };
+const BOOL_OPTION_ROWS = [
+  ["susfs_enable", "nomount_enable"],
+  ["kpm_enable", "lz4_enable"],
+  ["lz4kd_enable", "unicode_enable"],
+  ["better_net", "adios_enable"],
+  ["rekernel_enable", "baseband_guard"],
+  ["self_config"],
+] as const;
 const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
   resukisu: "ReSukiSU",
@@ -151,6 +158,9 @@ function applyWorkflowDefaults(workflowKey: string, options: Record<string, stri
     options.unicode_enable = "false";
   }
   return options;
+}
+function optionsPrompt(workflowKey: string, prefix = "已选择"): string {
+  return `${prefix}：${WORKFLOWS[workflowKey][0]}\n勾选项为开启；SUSFS 与 NoMount 自动互斥。`;
 }
 function supportsSelfConfig(workflowKey: string): boolean {
   return ONEPLUS_15_WORKFLOW_KEYS.has(workflowKey);
@@ -482,15 +492,24 @@ async function resetSerialQuota(env: Env, serial: string): Promise<number | null
 
 function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
   const rows: any[] = [];
-  for (const [key, label] of Object.entries(BOOL_LABELS)) {
-    if (key === "self_config" && !showSelf) continue;
-    rows.push([{ text: `${options[key] === "true" ? "✅" : "⬜"} ${label}`, callback_data: `toggle:${key}` }]);
+  for (const keys of BOOL_OPTION_ROWS) {
+    const row = keys
+      .filter(key => key !== "self_config" || showSelf)
+      .map(key => ({
+        text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
+        callback_data: `toggle:${key}`,
+      }));
+    if (row.length) rows.push(row);
   }
   rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: "cycle:ksu_type" }]);
-  rows.push([{ text: `BBR/Brutal：${options.bbr_enable}`, callback_data: "cycle:bbr_enable" }]);
-  rows.push([{ text: `Droidspaces：${options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" }]);
-  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }]);
-  rows.push([{ text: "开始构建", callback_data: "dispatch" }, { text: "取消", callback_data: "cancel" }]);
+  const bbrLabel: Record<string, string> = { false: "关闭", true: "开启", default: "默认" };
+  const droidLabel: Record<string, string> = { false: "关闭", standard: "标准", extend: "扩展" };
+  rows.push([
+    { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: "cycle:bbr_enable" },
+    { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" },
+  ]);
+  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }, { text: "取消", callback_data: "cancel" }]);
+  rows.push([{ text: "🚀 开始构建", callback_data: "dispatch" }]);
   return { inline_keyboard: rows };
 }
 function workflowMarkup() {
@@ -500,7 +519,7 @@ function workflowMarkup() {
 }
 function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
   const variants = SCRIPTS[scriptKey][1]!;
-  const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
+  const rows = [Object.entries(variants).map(([key, value]) => ({ text: value[0], callback_data: `variant:${scriptKey}:${key}` }))];
   if (showBind) rows.push([{ text: "🔒 绑定此脚本", callback_data: `bind:${scriptKey}` }]);
   if (showBack) rows.push([{ text: "⬅️ 上一步", callback_data: "back:scripts" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
@@ -600,7 +619,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
       }
       await setSession(env, userId, session);
       if (variants) await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择风驰版本：`, variantMarkup(bound, isAdmin(env, userId)));
-      else await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择功能：`, optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound)));
+      else await sendMessage(env, chatId, optionsPrompt(bound, "已绑定"), optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound)));
       return;
     }
     await setSession(env, userId, session);
@@ -734,6 +753,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   }
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
   const options = { ...(session.options || defaults()) };
+  delete options.zarm_tool;
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
@@ -818,7 +838,7 @@ async function handleCallback(env: Env, update: any) {
     session.workflow = key; session.options ||= defaults();
     applyWorkflowDefaults(key, session.options);
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[key][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(key))); return;
+    await editMessage(env, chatId, messageId, optionsPrompt(key), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(key))); return;
   }
   if (data.startsWith("variant:")) {
     const [, scriptKey, variantKey] = data.split(":");
@@ -834,7 +854,7 @@ async function handleCallback(env: Env, update: any) {
     session.workflow = workflowKey; session.options ||= defaults();
     applyWorkflowDefaults(workflowKey, session.options);
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, `已选择：${WORKFLOWS[workflowKey][0]}\n继续选择功能：`, optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey))); return;
+    await editMessage(env, chatId, messageId, optionsPrompt(workflowKey), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey))); return;
   }
   if (!isAdmin(env, userId)) {
     const boundScript = await workflowForUser(env, userId);
@@ -848,15 +868,14 @@ async function handleCallback(env: Env, update: any) {
   }
   const options = session.options;
   if (!options) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
+  delete options.zarm_tool;
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
     if (key === "self_config" && !isAdmin(env, userId)) { await answerCallback(env, query.id, "该配置仅限所有者使用", true); return; }
     const value = options[key] === "true" ? "false" : "true";
-    if (key === "zarm_tool" && value === "true" && options.lz4kd_enable !== "true") { await answerCallback(env, query.id, "请先开启 LZ4KD", true); return; }
     options[key] = value;
     if (value === "true" && key === "susfs_enable") options.nomount_enable = "false";
     if (value === "true" && key === "nomount_enable") options.susfs_enable = "false";
-    if (key === "lz4kd_enable" && value === "false") options.zarm_tool = "false";
   } else if (data.startsWith("cycle:")) {
     const key = data.slice(6); const choices = key === "ksu_type" ? KSU_VALUES : key === "bbr_enable" ? BBR_VALUES : key === "droidspaces_enable" ? DROID_VALUES : null;
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
