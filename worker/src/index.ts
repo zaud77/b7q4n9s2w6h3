@@ -114,6 +114,14 @@ const BOOL_LABELS: Record<string, string> = {
   rekernel_enable: "Re-Kernel",
   baseband_guard: "基带保护",
 };
+const BOOL_OPTION_ROWS = [
+  ["susfs_enable", "nomount_enable"],
+  ["kpm_enable", "lz4_enable"],
+  ["lz4kd_enable", "unicode_enable"],
+  ["better_net", "adios_enable"],
+  ["rekernel_enable", "baseband_guard"],
+  ["self_config"],
+] as const;
 const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
   resukisu: "ReSukiSU",
@@ -484,17 +492,24 @@ async function resetSerialQuota(env: Env, serial: string): Promise<number | null
 
 function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
   const rows: any[] = [];
-  for (const [key, label] of Object.entries(BOOL_LABELS)) {
-    if (key === "self_config" && !showSelf) continue;
-    rows.push([{ text: `${options[key] === "true" ? "✅" : "⬜"} ${label}`, callback_data: `toggle:${key}` }]);
+  for (const keys of BOOL_OPTION_ROWS) {
+    const row = keys
+      .filter(key => key !== "self_config" || showSelf)
+      .map(key => ({
+        text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
+        callback_data: `toggle:${key}`,
+      }));
+    if (row.length) rows.push(row);
   }
   rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: "cycle:ksu_type" }]);
   const bbrLabel: Record<string, string> = { false: "关闭", true: "开启", default: "默认" };
   const droidLabel: Record<string, string> = { false: "关闭", standard: "标准", extend: "扩展" };
-  rows.push([{ text: `BBR/Brutal：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: "cycle:bbr_enable" }]);
-  rows.push([{ text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" }]);
-  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }]);
-  rows.push([{ text: "开始构建", callback_data: "dispatch" }, { text: "取消", callback_data: "cancel" }]);
+  rows.push([
+    { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: "cycle:bbr_enable" },
+    { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: "cycle:droidspaces_enable" },
+  ]);
+  rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }, { text: "取消", callback_data: "cancel" }]);
+  rows.push([{ text: "🚀 开始构建", callback_data: "dispatch" }]);
   return { inline_keyboard: rows };
 }
 function workflowMarkup() {
@@ -504,7 +519,7 @@ function workflowMarkup() {
 }
 function variantMarkup(scriptKey: string, showBack = true, showBind = false) {
   const variants = SCRIPTS[scriptKey][1]!;
-  const rows = Object.entries(variants).map(([key, value]) => [{ text: value[0], callback_data: `variant:${scriptKey}:${key}` }]);
+  const rows = [Object.entries(variants).map(([key, value]) => ({ text: value[0], callback_data: `variant:${scriptKey}:${key}` }))];
   if (showBind) rows.push([{ text: "🔒 绑定此脚本", callback_data: `bind:${scriptKey}` }]);
   if (showBack) rows.push([{ text: "⬅️ 上一步", callback_data: "back:scripts" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
@@ -764,12 +779,15 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
 async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   await answerCallback(env, query.id);
-  if (!(await serialForUser(env, userId)) && !isAdmin(env, userId)) {
+  const data = query.data || "";
+  const quickOptionsAction = data.startsWith("toggle:") || data.startsWith("cycle:");
+  const dispatchAction = data === "dispatch";
+  if (!quickOptionsAction && !dispatchAction && !(await serialForUser(env, userId)) && !isAdmin(env, userId)) {
     await setUserCommands(env, userId, false);
     await editMessage(env, chatId, messageId, "请先使用 /start 绑定设备序列号。");
     return;
   }
-  const data = query.data || ""; const session = await getSession(env, userId);
+  const session = await getSession(env, userId);
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
   if (data === "back:scripts") {
     delete session.workflow; delete session.selectedScript; session.options = defaults();
@@ -840,7 +858,11 @@ async function handleCallback(env: Env, update: any) {
     await setSession(env, userId, session);
     await editMessage(env, chatId, messageId, optionsPrompt(workflowKey), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey))); return;
   }
-  if (!isAdmin(env, userId)) {
+  if (quickOptionsAction && !WORKFLOWS[session.workflow || ""]) {
+    await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。");
+    return;
+  }
+  if (!isAdmin(env, userId) && !quickOptionsAction && !dispatchAction) {
     const boundScript = await workflowForUser(env, userId);
     const selectedScript = WORKFLOW_SCRIPTS[session.workflow || ""];
     if (!boundScript || selectedScript !== boundScript) {

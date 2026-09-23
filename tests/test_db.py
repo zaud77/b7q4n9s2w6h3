@@ -226,9 +226,17 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     assert any("自用配置" in label for label in owner_labels)
     assert any("上一步" in label for label in public_labels)
     assert not any("zarm" in label.lower() for label in owner_labels)
-    assert all(len(row) == 1 for row in public_markup.inline_keyboard[:-1])
-    assert [button.text for button in public_markup.inline_keyboard[-1]] == ["开始构建", "取消"]
-    assert all(len(row) == 1 for row in variant_markup("623").inline_keyboard[:2])
+    public_rows = [[button.text for button in row] for row in public_markup.inline_keyboard]
+    assert public_rows[:5] == [
+        ["⬜ SUSFS", "⬜ NoMount"],
+        ["⬜ KPM / KPatch Next", "✅ LZ4 + Zstd"],
+        ["⬜ LZ4KD", "✅ Unicode 修复"],
+        ["⬜ 网络增强", "⬜ ADIOS"],
+        ["⬜ Re-Kernel", "⬜ 基带保护"],
+    ]
+    assert public_rows[-2] == ["⬅️ 上一步", "取消"]
+    assert public_rows[-1] == ["🚀 开始构建"]
+    assert [[button.text for button in row] for row in variant_markup("623").inline_keyboard[:1]] == [["金标", "紫标"]]
     assert "SUSFS 与 NoMount 自动互斥" in options_prompt("623g")
 
 
@@ -257,8 +265,4 @@ def test_variant_bind_button_is_only_shown_before_binding():
     assert any("绑定此脚本" in label for label in before_binding)
     assert not any("绑定此脚本" in label for label in after_binding)
     variant_rows = variant_markup("623", show_back=False, show_bind=False).inline_keyboard
-    assert [[button.text for button in row] for row in variant_rows] == [
-        ["金标"],
-        ["紫标"],
-        ["取消"],
-    ]
+    assert [[button.text for button in row] for row in variant_rows] == [["金标", "紫标"], ["取消"]]

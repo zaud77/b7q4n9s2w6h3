@@ -115,6 +115,14 @@ BOOL_LABELS = {
     "rekernel_enable": "Re-Kernel",
     "baseband_guard": "基带保护",
 }
+BOOL_OPTION_ROWS = (
+    ("susfs_enable", "nomount_enable"),
+    ("kpm_enable", "lz4_enable"),
+    ("lz4kd_enable", "unicode_enable"),
+    ("better_net", "adios_enable"),
+    ("rekernel_enable", "baseband_guard"),
+    ("self_config",),
+)
 KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
 KSU_LABELS = {
     "resukisu": "ReSukiSU",
@@ -209,10 +217,10 @@ def variant_markup(
     show_bind: bool = False,
 ) -> InlineKeyboardMarkup:
     variants = SCRIPTS[script_key][1]
-    keyboard = [
-        [InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")]
+    keyboard = [[
+        InlineKeyboardButton(label, callback_data=f"variant:{script_key}:{variant_key}")
         for variant_key, (label, _) in variants.items()
-    ]
+    ]]
     if show_bind:
         keyboard.append(
             [InlineKeyboardButton("🔒 绑定此脚本", callback_data=f"bind:{script_key}")]
@@ -528,26 +536,28 @@ class KernelBuildBot:
 
     def options_markup(self, options: dict[str, str], show_self_config: bool) -> InlineKeyboardMarkup:
         rows = []
-        for key, label in BOOL_LABELS.items():
-            if key == "self_config" and not show_self_config:
-                continue
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        f"{'✅' if options[key] == 'true' else '⬜'} {label}",
-                        callback_data=f"toggle:{key}",
-                    )
-                ]
-            )
+        for keys in BOOL_OPTION_ROWS:
+            row = [
+                InlineKeyboardButton(
+                    f"{'✅' if options[key] == 'true' else '⬜'} {BOOL_LABELS[key]}",
+                    callback_data=f"toggle:{key}",
+                )
+                for key in keys
+                if key != "self_config" or show_self_config
+            ]
+            if row:
+                rows.append(row)
         bbr_label = {"false": "关闭", "true": "开启", "default": "默认"}.get(options["bbr_enable"], options["bbr_enable"])
         droid_label = {"false": "关闭", "standard": "标准", "extend": "扩展"}.get(options["droidspaces_enable"], options["droidspaces_enable"])
         rows.extend(
             [
                 [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data="cycle:ksu_type")],
-                [InlineKeyboardButton(f"BBR/Brutal：{bbr_label}", callback_data="cycle:bbr_enable")],
-                [InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data="cycle:droidspaces_enable")],
-                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant")],
-                [InlineKeyboardButton("开始构建", callback_data="dispatch"), InlineKeyboardButton("取消", callback_data="cancel")],
+                [
+                    InlineKeyboardButton(f"BBR：{bbr_label}", callback_data="cycle:bbr_enable"),
+                    InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data="cycle:droidspaces_enable"),
+                ],
+                [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant"), InlineKeyboardButton("取消", callback_data="cancel")],
+                [InlineKeyboardButton("🚀 开始构建", callback_data="dispatch")],
             ]
         )
         return InlineKeyboardMarkup(rows)
@@ -555,11 +565,17 @@ class KernelBuildBot:
     async def callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         await query.answer()
-        if not self.is_admin(query.from_user.id) and not self.db.serial_for_user(query.from_user.id):
+        data = query.data
+        quick_options_action = data.startswith(("toggle:", "cycle:"))
+        if (
+            not self.is_admin(query.from_user.id)
+            and not quick_options_action
+            and data != "dispatch"
+            and not self.db.serial_for_user(query.from_user.id)
+        ):
             await self.sync_user_commands(context, query.from_user.id, False)
             await query.edit_message_text("请先使用 /start 绑定设备序列号。")
             return
-        data = query.data
         if data == "cancel":
             context.user_data.clear()
             await query.edit_message_text("已取消。")
@@ -679,7 +695,10 @@ class KernelBuildBot:
             )
             return
         workflow_key = context.user_data.get("workflow", "")
-        if not self.is_admin(query.from_user.id):
+        if quick_options_action and workflow_key not in WORKFLOWS:
+            await query.edit_message_text("会话已失效，请重新使用 /build。")
+            return
+        if not self.is_admin(query.from_user.id) and not quick_options_action:
             bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
             if not bound_script or WORKFLOW_SCRIPTS.get(workflow_key) != bound_script:
                 context.user_data.pop("workflow", None)
