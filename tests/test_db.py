@@ -256,5 +256,9 @@ def test_variant_bind_button_is_only_shown_before_binding():
     ]
     assert any("绑定此脚本" in label for label in before_binding)
     assert not any("绑定此脚本" in label for label in after_binding)
-    variant_row = variant_markup("623", show_back=False, show_bind=False).inline_keyboard[0]
-    assert [button.text for button in variant_row] == ["金标", "紫标"]
+    variant_rows = variant_markup("623", show_back=False, show_bind=False).inline_keyboard
+    assert [[button.text for button in row] for row in variant_rows] == [
+        ["金标"],
+        ["紫标"],
+        ["取消"],
+    ]
