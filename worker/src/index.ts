@@ -73,11 +73,10 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
     purple: ["紫标", "638ap"],
   }],
   "658": ["6.12.58 · OnePlus Pad 3 Pro", {
-    purple: ["紫标", "658p"],
+    gold: ["金标", "658g"],
   }],
   "658m": ["6.12.58 · OnePlus Ace 6 Ultra", {
     gold: ["金标", "658mg"],
-    purple: ["紫标", "658mp"],
   }],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
@@ -87,11 +86,10 @@ const WORKFLOWS: Record<string, [string, string]> = {
   "638tp": ["6.12.38 · OnePlus 15T · 紫标", "fastbuild_6.12.38_oneplus_15t_hmbird_purple.yml"],
   "638ag": ["6.12.38 · OnePlus Ace 6T · 金标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_gold.yml"],
   "638ap": ["6.12.38 · OnePlus Ace 6T · 紫标", "fastbuild_6.12.38_oneplus_ace6t_hmbird_purple.yml"],
-  "658p": ["6.12.58 · OnePlus Pad 3 Pro · 紫标", "fastbuild_6.12.58_hmbird_purple.yml"],
+  "658g": ["6.12.58 · OnePlus Pad 3 Pro · 金标", "fastbuild_6.12.58_hmbird_gold.yml"],
   "623mg": ["6.12.23 · OPPO Find X9 · 金标", "fastbuild_6.12.23_mtk_hmbird_gold.yml"],
   "623mp": ["6.12.23 · OPPO Find X9 · 紫标", "fastbuild_6.12.23_mtk_hmbird_purple.yml"],
   "658mg": ["6.12.58 · OnePlus Ace 6 Ultra · 金标", "fastbuild_6.12.58_mtk_hmbird_gold.yml"],
-  "658mp": ["6.12.58 · OnePlus Ace 6 Ultra · 紫标", "fastbuild_6.12.58_mtk_hmbird_purple.yml"],
 };
 const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
   Object.entries(SCRIPTS).flatMap(([scriptKey, value]) =>
@@ -102,10 +100,12 @@ const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
 const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
   ...WORKFLOW_SCRIPTS,
-  // Preserve old device bindings after variants without an official matching
-  // HMBIRD commit were removed from the selectable workflow list.
+  // Normalize persisted workflow choices back to their device binding keys.
   "658g": "658",
+  "658p": "658",
+  "658mp": "658m",
 };
+
 const BOOL_LABELS: Record<string, string> = {
   self_config: "自用配置",
   susfs_enable: "SUSFS",
