@@ -29,6 +29,8 @@
     "ADMIN_USER_IDS": "5926546019",
     "GITHUB_REPO": "zaomi893/t8x3p6r9m2k7",
     "GITHUB_REF": "main",
+    "LKM_GITHUB_REPO": "zaominn/nomount-lkm",
+    "LKM_GITHUB_REF": "main",
     "BUILD_COOLDOWN_SECONDS": "600",
     "DAILY_BUILD_LIMIT": "2",
     "DAILY_BUILD_BONUS_DATE": "2026-09-10",

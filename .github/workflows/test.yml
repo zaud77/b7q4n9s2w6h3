@@ -30,3 +30,4 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check:worker
+      - run: pnpm run test:worker

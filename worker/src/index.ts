@@ -1,4 +1,4 @@
-import { unzipSync } from "fflate";
+import { unzipSync, strFromU8 } from "fflate";
 
 type Env = {
   SERIALS: KVNamespace;
@@ -12,6 +12,9 @@ type Env = {
   ADMIN_USER_IDS: string;
   GITHUB_REPO: string;
   GITHUB_REF: string;
+  LKM_GITHUB_REPO: string;
+  LKM_GITHUB_REF: string;
+  LKM_GITHUB_TOKEN?: string;
   BUILD_COOLDOWN_SECONDS: string;
   DAILY_BUILD_LIMIT: string;
   DAILY_BUILD_BONUS_DATE?: string;
@@ -26,6 +29,7 @@ type Session = {
   options?: Record<string, string>;
   ownerDirectedBuild?: boolean;
   deliveryChatId?: number;
+  nomountRequestId?: string;
 };
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
@@ -33,7 +37,7 @@ const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
 const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
-const COMMAND_MENU_REVISION = "commands:scoped-menus-v4";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v5";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
@@ -42,11 +46,13 @@ const UNVERIFIED_COMMANDS = [
 const VERIFIED_COMMANDS = [
   { command: "start", description: "启动机器人" },
   { command: "build", description: "构建绑定设备的内核" },
+  { command: "nomount", description: "构建绑定序列号的独立 NoMount 模块" },
   { command: "clear", description: "清除私聊记录和当前操作" },
 ];
 const ADMIN_COMMANDS = [
   { command: "start", description: "启动机器人" },
   { command: "build", description: "构建绑定设备的内核" },
+  { command: "nomount", description: "构建绑定序列号的独立 NoMount 模块" },
   { command: "clear", description: "清除私聊记录和当前操作" },
   { command: "buildfor", description: "为指定白名单序列号构建" },
   { command: "allow", description: "添加白名单序列号" },
@@ -792,6 +798,26 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     await setSession(env, userId, { awaitingJoinSerial: true });
     await sendMessage(env, chatId, "请输入设备序列号："); return;
   }
+  if (command === "nomount") {
+    if (message.chat.type !== "private" || Number(chatId) !== Number(userId)) {
+      await sendMessage(env, chatId, "请私聊机器人使用 /nomount。"); return;
+    }
+    if (args.length) {
+      await sendMessage(env, chatId, "直接发送 /nomount；无需填写序列号，只能构建自己已绑定的设备。"); return;
+    }
+    if (!boundSerial || !(await serialRecord(env, boundSerial)) || !(await isMember(env, userId))) {
+      await sendMessage(env, chatId, "请先使用 /start 绑定有效序列号并完成入群验证。"); return;
+    }
+    if (!env.LKM_GITHUB_TOKEN) {
+      await sendMessage(env, chatId, "独立模块构建凭据尚未配置，请联系管理员。"); return;
+    }
+    const nomountRequestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+    await setSession(env, userId, { serial: boundSerial, nomountRequestId });
+    await sendMessage(env, chatId,
+      `构建 NoMount Suite LKM，绑定设备尾号 ${boundSerial.slice(-4)}。\n目前适配 ARM64、Android 16 及以上、Linux 6.12；原厂内核加载仍需实机验证。\n不改变你的内核构建脚本绑定；本次成功构建使用现有配额。`,
+      { inline_keyboard: [[{ text: "🚀 构建 NoMount LKM", callback_data: `nomount:${nomountRequestId}` }], [{ text: "取消", callback_data: "cancel" }]] });
+    return;
+  }
   if (command === "build") {
     if (!(await isMember(env, userId))) { await sendMessage(env, chatId, "尚未通过入群验证，请先使用 /start。"); return; }
     const serial = await serialForUser(env, userId);
@@ -929,24 +955,8 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (!isAdmin(env, userId) && (await workflowForUser(env, userId)) !== boundScript) {
     await editMessage(env, chatId, messageId, "构建脚本绑定复核失败，请重新使用 /build。"); return;
   }
-  if (!isAdmin(env, userId)) {
-    const submittedAt = now();
-    const [dayStart, dayEnd] = beijingDayBounds(submittedAt);
-    const quotaStart = await quotaStartForUser(env, userId, dayStart);
-    const latest: any = await env.DB.prepare(
-      "SELECT MAX(created_at) AS latest FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
-    ).bind(userId, quotaStart, dayEnd).first();
-    const cooldown = Number(env.BUILD_COOLDOWN_SECONDS || 600);
-    const wait = latest?.latest ? Math.max(0, cooldown - (submittedAt - Number(latest.latest))) : 0;
-    if (wait) { await editMessage(env, chatId, messageId, `请在 ${wait} 秒后再构建。`); return; }
-    const count: any = await env.DB.prepare(
-      "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
-    ).bind(userId, quotaStart, dayEnd).first();
-    const beijingDate = new Date((submittedAt + 8 * 3600) * 1000).toISOString().slice(0, 10);
-    const dailyBonus = env.DAILY_BUILD_BONUS_DATE === beijingDate ? Number(env.DAILY_BUILD_BONUS || 0) : 0;
-    const limit = Number(env.DAILY_BUILD_LIMIT || 2) + Math.max(0, dailyBonus);
-    if (Number(count?.total || 0) >= limit) { await editMessage(env, chatId, messageId, `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。`); return; }
-  }
+  const quotaMessage = await buildQuotaMessage(env, userId);
+  if (quotaMessage) { await editMessage(env, chatId, messageId, quotaMessage); return; }
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
   const selectedOptions = { ...(session.options || defaults()) };
   const options = { ...selectedOptions };
@@ -975,10 +985,85 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   await clearSession(env, userId); await editMessage(env, chatId, messageId, "构建已提交，请等待完成。完成后机器人会直接发送刷机包。");
 }
 
+async function buildQuotaMessage(env: Env, userId: number): Promise<string | null> {
+  if (isAdmin(env, userId)) return null;
+  const submittedAt = now();
+  const [dayStart, dayEnd] = beijingDayBounds(submittedAt);
+  const quotaStart = await quotaStartForUser(env, userId, dayStart);
+  const latest: any = await env.DB.prepare(
+    "SELECT MAX(created_at) AS latest FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
+  ).bind(userId, quotaStart, dayEnd).first();
+  const wait = latest?.latest ? Math.max(0, Number(env.BUILD_COOLDOWN_SECONDS || 600) - (submittedAt - Number(latest.latest))) : 0;
+  if (wait) return `请在 ${wait} 秒后再构建。`;
+  const count: any = await env.DB.prepare(
+    "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
+  ).bind(userId, quotaStart, dayEnd).first();
+  const beijingDate = new Date((submittedAt + 8 * 3600) * 1000).toISOString().slice(0, 10);
+  const dailyBonus = env.DAILY_BUILD_BONUS_DATE === beijingDate ? Number(env.DAILY_BUILD_BONUS || 0) : 0;
+  const limit = Number(env.DAILY_BUILD_LIMIT || 2) + Math.max(0, dailyBonus);
+  return Number(count?.total || 0) >= limit ? `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。` : null;
+}
+
+async function nomountInputs(serial: string, requestId: string): Promise<Record<string, string>> {
+  if (!SERIAL_RE.test(serial) || !/^[a-f0-9]{16}$/.test(requestId)) throw new Error("invalid device build input");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(serial));
+  return { device_serial_sha256: Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, "0")).join(""), build_request_id: requestId };
+}
+
+async function dispatchNoMountBuild(env: Env, query: any, session: Session, requestId: string) {
+  const userId = Number(query.from.id), chatId = Number(query.message.chat.id), messageId = query.message.message_id;
+  const reject = (text: string) => editMessage(env, chatId, messageId, text);
+  if (query.message.chat.type !== "private" || chatId !== userId) { await reject("请私聊机器人使用 /nomount。"); return; }
+  if (!session.nomountRequestId || requestId !== session.nomountRequestId || !/^[a-f0-9]{16}$/.test(requestId)) {
+    await reject("构建确认已失效，请重新使用 /nomount。"); return;
+  }
+  if (await activeBuild(env, userId)) { await reject("已有构建正在进行，请等待完成。"); return; }
+  const serial = await serialForUser(env, userId);
+  if (!serial || serial !== session.serial || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
+    await clearSession(env, userId); await reject("序列号或成员授权复核失败，未触发构建。"); return;
+  }
+  if (!env.LKM_GITHUB_TOKEN || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.LKM_GITHUB_REPO || "")) {
+    await reject("独立模块构建凭据或仓库尚未配置，请联系管理员。"); return;
+  }
+  const quotaMessage = await buildQuotaMessage(env, userId);
+  if (quotaMessage) { await reject(quotaMessage); return; }
+  const inputs = await nomountInputs(serial, requestId);
+  const stored = { ...inputs, build_kind: "nomount-lkm", github_repo: env.LKM_GITHUB_REPO };
+  const created = now();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) " +
+      "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
+    ).bind(requestId, userId, userId, userId, "lkm.yml", JSON.stringify(stored), created, created).run();
+  } catch {
+    await reject("这次构建已登记或已有构建正在进行，请勿重复提交。"); return;
+  }
+  let response: Response;
+  try {
+    response = await fetch(`https://api.github.com/repos/${env.LKM_GITHUB_REPO}/actions/workflows/lkm.yml/dispatches`, {
+      method: "POST", headers: ghHeaders(env, true),
+      body: JSON.stringify({ ref: env.LKM_GITHUB_REF || "main", inputs }),
+    });
+  } catch {
+    await clearSession(env, userId);
+    await reject("提交响应超时，机器人会按请求编号查询结果，请勿重复提交。"); return;
+  }
+  if (response.status !== 204) {
+    console.error("NoMount dispatch rejected", response.status);
+    await finishJob(env, requestId, "failed");
+    await clearSession(env, userId); await reject("GitHub 未接受本次构建，请联系管理员。"); return;
+  }
+  await clearSession(env, userId);
+  await reject("NoMount LKM 构建已提交，绑定你自己的设备。完成后将私聊发送模块 ZIP。");
+}
+
 async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   await answerCallback(env, query.id);
   const data = query.data || "";
+  if (data.startsWith("nomount:")) {
+    await dispatchNoMountBuild(env, query, await getSession(env, userId), data.slice(8)); return;
+  }
   if (data.startsWith("set:")) {
     const [, key] = data.split(":", 3);
     if (key === "self_config" && !isAdmin(env, userId)) {
@@ -1168,8 +1253,10 @@ async function handleUpdate(env: Env, update: any) {
   return handleText(env, update);
 }
 
-function ghHeaders(env: Env) {
-  return { "accept": "application/vnd.github+json", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "user-agent": "oneplus-gki-worker" };
+function ghHeaders(env: Env, lkm = false) {
+  const token = lkm ? env.LKM_GITHUB_TOKEN : env.GITHUB_TOKEN;
+  if (!token) throw new Error("GitHub credential unavailable");
+  return { "accept": "application/vnd.github+json", "authorization": `Bearer ${token}`, "x-github-api-version": "2022-11-28", "user-agent": "oneplus-gki-worker" };
 }
 async function sendDocument(env: Env, chatId: number, filename: string, bytes: Uint8Array, caption?: string) {
   const form = new FormData(); form.set("chat_id", String(chatId));
@@ -1214,15 +1301,20 @@ async function downloadLatestKowSuManager(env: Env): Promise<{ name: string; byt
 }
 
 async function processJob(env: Env, job: any) {
-  const root = `https://api.github.com/repos/${env.GITHUB_REPO}`; let run: any; let runId = job.github_run_id;
+  let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
+  const lkm = inputs.build_kind === "nomount-lkm" && job.workflow_file === "lkm.yml";
+  const repo = lkm ? inputs.github_repo : env.GITHUB_REPO;
+  if (lkm && repo !== env.LKM_GITHUB_REPO) throw new Error("NoMount repository binding changed");
+  const headers = ghHeaders(env, lkm);
+  const root = `https://api.github.com/repos/${repo}`; let run: any; let runId = job.github_run_id;
   if (!runId) {
-    const response = await fetch(`${root}/actions/workflows/${job.workflow_file}/runs?event=workflow_dispatch&per_page=50`, { headers: ghHeaders(env) });
+    const response = await fetch(`${root}/actions/workflows/${job.workflow_file}/runs?event=workflow_dispatch&per_page=50`, { headers });
     if (!response.ok) throw new Error(`runs ${response.status}`);
     const runs: any[] = (await response.json() as any).workflow_runs || [];
     run = runs.find(r => String(r.display_title || "").includes(job.request_id));
-    if (!run) {
+    if (!run && !lkm) {
       for (const candidate of runs.filter(r => Date.parse(r.created_at) / 1000 >= job.created_at - 120)) {
-        const jr = await fetch(`${root}/actions/runs/${candidate.id}/jobs?per_page=10`, { headers: ghHeaders(env) });
+        const jr = await fetch(`${root}/actions/runs/${candidate.id}/jobs?per_page=10`, { headers });
         if (!jr.ok) continue; const jobs: any[] = (await jr.json() as any).jobs || [];
         if (jobs.some(j => String(j.name || "").includes(job.request_id))) { run = candidate; break; }
       }
@@ -1234,7 +1326,7 @@ async function processJob(env: Env, job: any) {
     runId = run.id;
     await env.DB.prepare("UPDATE build_jobs SET github_run_id=?,status='running',updated_at=? WHERE request_id=?").bind(runId, now(), job.request_id).run();
   } else {
-    const response = await fetch(`${root}/actions/runs/${runId}`, { headers: ghHeaders(env) });
+    const response = await fetch(`${root}/actions/runs/${runId}`, { headers });
     if (!response.ok) throw new Error(`run ${response.status}`); run = await response.json();
   }
   if (run.status !== "completed") return;
@@ -1244,9 +1336,20 @@ async function processJob(env: Env, job: any) {
     "WHERE request_id=? AND (status IN ('running','delivery_pending') OR (status='delivering' AND updated_at<=?))"
   ).bind(now(), now(), job.request_id, now() - 300).run();
   if (!Number(claimed.meta.changes || 0)) return;
-  const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers: ghHeaders(env) });
+  const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
-  let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
+  if (lkm) {
+    const artifact = artifacts.find(a => a.name === "nomount-suite-lkm" && !a.expired);
+    if (!artifact) throw new Error("NoMount module artifact missing");
+    const download = await fetch(artifact.archive_download_url, { headers, redirect: "follow" });
+    if (!download.ok) throw new Error(`NoMount artifact download ${download.status}`);
+    const module = unwrapArtifact(new Uint8Array(await download.arrayBuffer()), /^NoMount-Suite-v[0-9.]+-LKM\.zip$/);
+    if (!module) throw new Error("Expected one installable NoMount module ZIP");
+    validateNoMountPackage(module.bytes, inputs.device_serial_sha256);
+    await sendDocument(env, Number(job.chat_id), module.name, module.bytes,
+      "NoMount LKM 已构建完成，仅绑定你自己的设备。原厂内核加载兼容性仍需实机确认。");
+    await finishJob(env, job.request_id, "sent", runId); return;
+  }
   const kowsuRequested = ["kowsu", "kowx"].includes(String(inputs.ksu_type || "").toLowerCase());
   const kowsuManager = kowsuRequested ? await downloadLatestKowSuManager(env) : null;
   const packages: Array<[RegExp, RegExp, string | undefined, boolean, boolean]> = [[/^(AnyKernel3|ak3)_.*\.zip$/i, /^(AnyKernel3|ak3)_.*\.zip$/i, isAdmin(env, job.chat_id) ? "构建完成，刷机前请确认机型和序列号。" : undefined, false, true]];
@@ -1272,12 +1375,24 @@ async function processJob(env: Env, job: any) {
   }
   await finishJob(env, job.request_id, "sent", runId);
 }
+function validateNoMountPackage(bytes: Uint8Array, serialDigest: string) {
+  if (!/^[a-f0-9]{64}$/.test(serialDigest || "")) throw new Error("Missing expected device binding");
+  const files = unzipSync(bytes);
+  const binding = files["lkm/binding.conf"] ? strFromU8(files["lkm/binding.conf"]) : "";
+  const lines = new Set(binding.trim().split(/\r?\n/));
+  if (!lines.has("smoke_only=0") || !lines.has(`serial_sha256=${serialDigest}`)) throw new Error("Wrong device or smoke package");
+  const modules = Object.keys(files).filter(name => name.endsWith(".ko"));
+  if (modules.length !== 1 || modules[0] !== "lkm/nomount.ko") throw new Error("Expected one NoMount KO");
+  for (const name of ["lkm/nomount.ko", "classes.dex", "zygisk/arm64-v8a.so", "module.prop"]) {
+    if (!files[name]?.length) throw new Error("Incomplete NoMount package");
+  }
+}
 async function finishJob(env: Env, requestId: string, status: string, runId?: number) {
   await env.DB.prepare("UPDATE build_jobs SET status=?,active_user_id=NULL,github_run_id=COALESCE(?,github_run_id),updated_at=? WHERE request_id=?")
     .bind(status, runId || null, now(), requestId).run();
 }
 async function monitorBuilds(env: Env) {
-  const result: any = await env.DB.prepare("SELECT * FROM build_jobs WHERE status IN ('submitted','running','delivery_pending','delivering') ORDER BY created_at LIMIT 10").all();
+  const result: any = await env.DB.prepare("SELECT * FROM build_jobs WHERE status IN ('submitted','running','delivery_pending','delivering') ORDER BY CASE WHEN json_extract(inputs,'$.build_kind')='nomount-lkm' THEN 0 ELSE 1 END,created_at LIMIT 10").all();
   for (const job of result.results) {
     try { await processJob(env, job); }
     catch (e) {
@@ -1296,7 +1411,7 @@ export default {
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN) });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;

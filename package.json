@@ -2,6 +2,7 @@
 	"private": true,
 	"scripts": {
 		"check:worker": "tsc -p worker/tsconfig.json --noEmit",
+		"test:worker": "node --test tests/worker.test.mjs",
 		"deploy:worker": "wrangler deploy --config worker/wrangler.jsonc"
 	},
 	"devDependencies": {
