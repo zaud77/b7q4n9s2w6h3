@@ -14,7 +14,7 @@ try {
     if ($nmWorkflow.state -ne 'active') { throw 'The NoMount workflow is not active; nothing was stored.' }
     Push-Location $nmBotRoot
     try {
-        $nmToken | & node $nmWranglerPath secret put GITHUB_LKM_TOKEN --config worker/wrangler.jsonc
+        $nmToken | & node $nmWranglerPath secret put LKM_GITHUB_TOKEN --config worker/wrangler.jsonc
         if ($LASTEXITCODE -ne 0) { throw 'Cloudflare rejected the secret update.' }
     } finally { Pop-Location }
     $nmHealth = Invoke-RestMethod -Uri 'https://gki.zaomin.dpdns.org/health'
