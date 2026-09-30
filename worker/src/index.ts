@@ -1377,14 +1377,19 @@ async function processJob(env: Env, job: any) {
 }
 function validateNoMountPackage(bytes: Uint8Array, serialDigest: string) {
   if (!/^[a-f0-9]{64}$/.test(serialDigest || "")) throw new Error("Missing expected device binding");
-  const files = unzipSync(bytes);
+  const entries = new Map<string, number>();
+  const files = unzipSync(bytes, { filter(file) {
+    if (entries.has(file.name)) throw new Error("Duplicate package entry");
+    entries.set(file.name, file.originalSize);
+    return file.name === "lkm/binding.conf" && file.originalSize <= 4096;
+  } });
   const binding = files["lkm/binding.conf"] ? strFromU8(files["lkm/binding.conf"]) : "";
   const lines = new Set(binding.trim().split(/\r?\n/));
   if (!lines.has("smoke_only=0") || !lines.has(`serial_sha256=${serialDigest}`)) throw new Error("Wrong device or smoke package");
-  const modules = Object.keys(files).filter(name => name.endsWith(".ko"));
+  const modules = Array.from(entries.keys()).filter(name => name.endsWith(".ko"));
   if (modules.length !== 1 || modules[0] !== "lkm/nomount.ko") throw new Error("Expected one NoMount KO");
   for (const name of ["lkm/nomount.ko", "classes.dex", "zygisk/arm64-v8a.so", "module.prop"]) {
-    if (!files[name]?.length) throw new Error("Incomplete NoMount package");
+    if (!entries.get(name)) throw new Error("Incomplete NoMount package");
   }
 }
 async function finishJob(env: Env, requestId: string, status: string, runId?: number) {

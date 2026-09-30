@@ -150,6 +150,8 @@ test("delivery refuses wrong bindings, smoke packages and extra KOs", async () =
   assert.throws(() => worker.validateNoMountPackage(packageBytes("b".repeat(64)), digest));
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "lkm/binding.conf": strToU8(`smoke_only=1\nserial_sha256=${digest}`) }), digest));
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "second.ko": strToU8("extra") }), digest));
+  assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "lkm/binding.conf": strToU8("a".repeat(4097)) }), digest));
+  assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "classes.dex": new Uint8Array() }), digest));
 });
 
 test("successful delivery sends the inner installable ZIP, not the artifact wrapper", async t => {
