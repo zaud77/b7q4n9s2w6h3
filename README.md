@@ -1,6 +1,6 @@
 # Build Workspace
 
-运行入口为 `worker/src/index.ts`，部署到现有 Cloudflare Worker，继续使用原来的 D1、KV、Telegram 机器人和用户绑定数据。本仓库在 `zaominn` 下私有维护，完整保留本地 Git 历史。不会迁移或改写原内核仓库。
+运行入口为 `worker/src/index.ts`，部署到现有 Cloudflare Worker，继续使用原来的 D1、KV、Telegram 机器人和用户绑定数据。本仓库在 `zaominn` 下私有维护，完整保留本地 Git 历史。
 
 ## 用户命令
 
@@ -10,11 +10,13 @@
 
 产物只发送到发起人的私聊。发送前核对设备摘要、测试包标记、单个 `.ko` 和 Android 后端；发送的是可安装的模块 ZIP，不是套了一层的 Actions 下载包。ARM64、Android 16 及以上、Linux 6.12 是当前适配范围，原厂加载与运行效果仍须实机验证。
 
-`/build` 等已有内核命令保留，仍指向原内核仓库；原账号申诉期间不保证这些构建可用。Python 客户端保留原内核构建用途，本次 `/nomount` 由线上 Cloudflare Worker 提供。
+`/build` 等已有内核命令使用私有的 `zaominn/t8x3p6r9m2k7`，保留全部十个机型/金紫标工作流、序列号授权、脚本绑定、功能选择记忆和私聊产物交付。原账号的仓库和本地旧内核仓库不改动。Python 客户端默认仓库也同步到新地址；`/nomount` 由线上 Cloudflare Worker 提供。
+
+所有用户，包括管理员，每个北京时间自然日共用一次成功构建额度。内核和 `/nomount` 共用额度；失败不扣次数，进行中的任务占用唯一槽位。每天北京时间零点进入新额度，迁移不清空既有成功记录或用户绑定。管理员 `/resetquota` 仍用于处理需要人工补偿的情况。
 
 ## 管理员凭据
 
-新模块使用独立的 `LKM_GITHUB_TOKEN`，不复用原内核仓库的 `GITHUB_TOKEN`。在 GitHub 创建 `zaominn` 的 fine-grained token，只选择 `nomount-lkm`，授予 Actions 读写、Contents 只读；令牌不提交到 Git，也不要发到聊天里。
+内核使用独立的 `KERNEL_GITHUB_TOKEN`，NoMount LKM 使用独立的 `LKM_GITHUB_TOKEN`，均不回退到旧账号的 `GITHUB_TOKEN`。建议在 GitHub 创建 `zaominn` 的 fine-grained token，各自只选择对应仓库，授予 Actions 读写、Contents 只读；令牌不提交到 Git，也不要发到聊天里。
 
 本机录入：
 

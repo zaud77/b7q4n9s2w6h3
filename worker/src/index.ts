@@ -4,7 +4,7 @@ type Env = {
   SERIALS: KVNamespace;
   DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
-  GITHUB_TOKEN: string;
+  KERNEL_GITHUB_TOKEN?: string;
   SERIAL_PEPPER: string;
   WEBHOOK_SECRET: string;
   REQUIRED_CHANNEL_ID: string;
@@ -17,8 +17,6 @@ type Env = {
   LKM_GITHUB_TOKEN?: string;
   BUILD_COOLDOWN_SECONDS: string;
   DAILY_BUILD_LIMIT: string;
-  DAILY_BUILD_BONUS_DATE?: string;
-  DAILY_BUILD_BONUS?: string;
 };
 
 type Session = {
@@ -967,26 +965,36 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
-  const gh = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`, {
-    method: "POST",
-    headers: { "accept": "application/vnd.github+json", "authorization": `Bearer ${env.GITHUB_TOKEN}`, "x-github-api-version": "2022-11-28", "user-agent": "oneplus-gki-worker" },
-    body: JSON.stringify({ ref: env.GITHUB_REF, inputs }),
-  });
-  if (gh.status !== 204) { console.error("GitHub dispatch", gh.status, await gh.text()); await editMessage(env, chatId, messageId, "GitHub 构建触发失败，请联系管理员。"); return; }
-  const serialHash = await digestSerial(env, serial); const created = now();
+  if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "内核构建凭据尚未配置，请联系管理员。"); return; }
+  const stored = { ...inputs, build_kind: "kernel", github_repo: env.GITHUB_REPO };
+  const created = now();
   try {
     await env.DB.prepare(
       "INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) " +
       "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
-    ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(inputs), created, created).run();
-  } catch (e) { console.error("record build", e); await editMessage(env, chatId, messageId, "构建已触发，但状态登记失败，请联系管理员。"); return; }
+    ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(stored), created, created).run();
+  } catch { await editMessage(env, chatId, messageId, "这次构建已登记或已有构建正在进行，请勿重复提交。"); return; }
+  let response: Response;
+  try {
+    response = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`, {
+      method: "POST", headers: ghHeaders(env),
+      body: JSON.stringify({ ref: env.GITHUB_REF, inputs }),
+    });
+  } catch {
+    await clearSession(env, userId);
+    await editMessage(env, chatId, messageId, "提交响应超时，机器人会按请求编号查询结果，请勿重复提交。"); return;
+  }
+  if (response.status !== 204) {
+    console.error("Kernel dispatch rejected", response.status);
+    await finishJob(env, requestId, "failed");
+    await clearSession(env, userId); await editMessage(env, chatId, messageId, "GitHub 未接受本次构建，请联系管理员。"); return;
+  }
   try { await saveBuildPreferences(env, userId, selectedOptions, isAdmin(env, userId)); }
   catch (error) { console.error("save build preferences failed", userId, String(error)); }
   await clearSession(env, userId); await editMessage(env, chatId, messageId, "构建已提交，请等待完成。完成后机器人会直接发送刷机包。");
 }
 
 async function buildQuotaMessage(env: Env, userId: number): Promise<string | null> {
-  if (isAdmin(env, userId)) return null;
   const submittedAt = now();
   const [dayStart, dayEnd] = beijingDayBounds(submittedAt);
   const quotaStart = await quotaStartForUser(env, userId, dayStart);
@@ -998,9 +1006,7 @@ async function buildQuotaMessage(env: Env, userId: number): Promise<string | nul
   const count: any = await env.DB.prepare(
     "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
   ).bind(userId, quotaStart, dayEnd).first();
-  const beijingDate = new Date((submittedAt + 8 * 3600) * 1000).toISOString().slice(0, 10);
-  const dailyBonus = env.DAILY_BUILD_BONUS_DATE === beijingDate ? Number(env.DAILY_BUILD_BONUS || 0) : 0;
-  const limit = Number(env.DAILY_BUILD_LIMIT || 2) + Math.max(0, dailyBonus);
+  const limit = Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 1));
   return Number(count?.total || 0) >= limit ? `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。` : null;
 }
 
@@ -1254,7 +1260,7 @@ async function handleUpdate(env: Env, update: any) {
 }
 
 function ghHeaders(env: Env, lkm = false) {
-  const token = lkm ? env.LKM_GITHUB_TOKEN : env.GITHUB_TOKEN;
+  const token = lkm ? env.LKM_GITHUB_TOKEN : env.KERNEL_GITHUB_TOKEN;
   if (!token) throw new Error("GitHub credential unavailable");
   return { "accept": "application/vnd.github+json", "authorization": `Bearer ${token}`, "x-github-api-version": "2022-11-28", "user-agent": "oneplus-gki-worker" };
 }
@@ -1303,7 +1309,7 @@ async function downloadLatestKowSuManager(env: Env): Promise<{ name: string; byt
 async function processJob(env: Env, job: any) {
   let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
   const lkm = inputs.build_kind === "nomount-lkm" && job.workflow_file === "lkm.yml";
-  const repo = lkm ? inputs.github_repo : env.GITHUB_REPO;
+  const repo = inputs.github_repo || env.GITHUB_REPO;
   if (lkm && repo !== env.LKM_GITHUB_REPO) throw new Error("NoMount repository binding changed");
   const headers = ghHeaders(env, lkm);
   const root = `https://api.github.com/repos/${repo}`; let run: any; let runId = job.github_run_id;
@@ -1416,7 +1422,7 @@ export default {
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN) });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 1)), quotaIncludesAdmins: true });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;

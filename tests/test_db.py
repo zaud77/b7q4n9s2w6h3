@@ -1,4 +1,5 @@
 from kernel_build_bot.db import Database, WORKFLOW_BINDING_MIGRATION
+from kernel_build_bot.config import Settings
 from kernel_build_bot.bot import (
     KernelBuildBot,
     SCRIPTS,
@@ -268,3 +269,48 @@ def test_variant_bind_button_is_only_shown_before_binding():
     assert not any("绑定此脚本" in label for label in after_binding)
     variant_rows = variant_markup("623", show_back=False, show_bind=False).inline_keyboard
     assert [[button.text for button in row] for row in variant_rows] == [["金标"], ["紫标"], ["取消"]]
+
+
+def test_default_configuration_uses_rebuilt_repo_and_one_daily_build(monkeypatch):
+    for key, value in {
+        "TELEGRAM_BOT_TOKEN": "fixture",
+        "REQUIRED_CHANNEL_ID": "-100123",
+        "ADMIN_USER_IDS": "1",
+        "GITHUB_TOKEN": "fixture",
+        "SERIAL_PEPPER": "fixture",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("GITHUB_REPO", raising=False)
+    monkeypatch.delenv("DAILY_BUILD_LIMIT", raising=False)
+    settings = Settings.from_env()
+    assert settings.github_repo == "zaominn/t8x3p6r9m2k7"
+    assert settings.daily_build_limit == 1
+
+
+def test_admin_build_is_not_exempt_from_daily_quota():
+    import asyncio
+    from types import SimpleNamespace
+
+    messages = []
+
+    async def reply(text):
+        messages.append(text)
+
+    async def no_active(_update):
+        return False
+
+    async def member(_context, _user_id):
+        return True
+
+    bot = KernelBuildBot.__new__(KernelBuildBot)
+    bot.settings = SimpleNamespace(daily_build_limit=1)
+    bot.db = SimpleNamespace(serial_for_user=lambda _user_id: "TEST_DEVICE_123")
+    bot.is_admin = lambda _user_id: True
+    bot.reject_while_building = no_active
+    bot.is_channel_member = member
+    bot.daily_build_count = lambda _user_id: 1
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1), effective_message=SimpleNamespace(reply_text=reply))
+    context = SimpleNamespace(user_data={})
+    asyncio.run(bot.build(update, context))
+    assert len(messages) == 1
+    assert "1 次构建上限" in messages[0]

@@ -487,10 +487,7 @@ class KernelBuildBot:
         if not serial:
             await update.effective_message.reply_text("当前 Telegram 账号尚未绑定有效序列号，请先使用 /start。")
             return
-        if (
-            not self.is_admin(user.id)
-            and self.daily_build_count(user.id) >= self.settings.daily_build_limit
-        ):
+        if self.daily_build_count(user.id) >= self.settings.daily_build_limit:
             await update.effective_message.reply_text(
                 f"今天已达到 {self.settings.daily_build_limit} 次构建上限，请在北京时间次日再试。"
             )
@@ -883,10 +880,7 @@ class KernelBuildBot:
             if wait:
                 await query.edit_message_text(f"请在 {wait} 秒后再构建。")
                 return
-        if (
-            not self.is_admin(user_id)
-            and self.daily_build_count(user_id) >= self.settings.daily_build_limit
-        ):
+        if self.daily_build_count(user_id) >= self.settings.daily_build_limit:
             await query.edit_message_text(
                 f"今天已达到 {self.settings.daily_build_limit} 次构建上限。"
             )
