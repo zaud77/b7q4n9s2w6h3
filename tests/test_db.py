@@ -283,7 +283,7 @@ def test_default_configuration_uses_rebuilt_repo_and_one_daily_build(monkeypatch
     monkeypatch.delenv("GITHUB_REPO", raising=False)
     monkeypatch.delenv("DAILY_BUILD_LIMIT", raising=False)
     settings = Settings.from_env()
-    assert settings.github_repo == "zaominn/t8x3p6r9m2k7"
+    assert settings.github_repo == "zaud77/t8x3p6r9m2k7"
     assert settings.daily_build_limit == 1
 
 

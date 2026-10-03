@@ -45,6 +45,9 @@ jobs:
               and .buildPreferencesMigration == "migration:user-build-preferences-v1"
               and .commandMenus == "commands:scoped-menus-v5"
               and .kernelBuildsReady == true
+              and .nomountBuildsReady == true
+              and .kernelRepository == "zaud77/t8x3p6r9m2k7"
+              and .nomountRepository == "zaud77/nomount-lkm"
               and .dailyBuildLimit == 1
               and .quotaIncludesAdmins == true' <<<"$response"; then
               exit 0
