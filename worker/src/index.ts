@@ -995,6 +995,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
 }
 
 async function buildQuotaMessage(env: Env, userId: number): Promise<string | null> {
+  if (isAdmin(env, userId)) return null;
   const submittedAt = now();
   const [dayStart, dayEnd] = beijingDayBounds(submittedAt);
   const quotaStart = await quotaStartForUser(env, userId, dayStart);
@@ -1006,7 +1007,7 @@ async function buildQuotaMessage(env: Env, userId: number): Promise<string | nul
   const count: any = await env.DB.prepare(
     "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
   ).bind(userId, quotaStart, dayEnd).first();
-  const limit = Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 1));
+  const limit = Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2));
   return Number(count?.total || 0) >= limit ? `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。` : null;
 }
 
@@ -1422,7 +1423,7 @@ export default {
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 1)), quotaIncludesAdmins: true });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;

@@ -12,7 +12,7 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 - 进入群组后必须仍是指定群组成员，且序列号处于启用状态，才显示并触发构建。
 - 已绑定 TG 账号的群组成员使用 `/build` 时直接读取有效绑定，不重复要求输入序列号。
 - 未绑定脚本时可以浏览全部机型和风驰版本；必须在机型的第二级菜单点击“绑定此脚本”后才能进入功能菜单和提交构建。绑定后隐藏绑定按钮并锁定该机型。
-- 每个 TG 账号按构建提交时的北京时间日期最多成功构建 2 次；跨零点完成仍归属开始日期，GitHub 触发失败和最终构建失败都不计次数。管理员可用 `/resetquota 序列号` 单独清零。
+- 普通 TG 账号按构建提交时的北京时间日期最多成功构建 2 次，内核与独立模块共用额度；管理员免每日额度和冷却限制，身份及并发保护仍保留。跨零点完成仍归属开始日期，GitHub 触发失败和最终构建失败都不计次数。管理员可用 `/resetquota 序列号` 单独清零。
 - 提交后不向普通用户显示 GitHub 仓库、Actions 地址、构建配置或交付说明；机器人持久化跟踪对应运行，成功后私聊发送请求的 ZIP 文件。选择 KowSU 时，还会从 `zaominn/KowSU` 最新正式 Release 获取并发送管理器 APK；机器人重启后继续跟踪。所有者仍可查看维护信息。
 - `/allow` 和白名单文件只登记序列号，不要求 Telegram ID；用户首次通过入频道验证时自动绑定其 Telegram 账号，防止之后被他人借用。
 - 菜单按机型和平台区分：一加 15、15T、骁龙 SM8845 Ace 6T、骁龙 SM8850 Pad 3 Pro、天玑 MT6993 Find X9 和 Ace 6 Ultra。Find X9、Ace6T 等有对应元数据源的机型分别显示金标和紫标风驰。
@@ -29,7 +29,7 @@ Telegram 频道成员与序列号白名单双重校验的 GitHub Actions 内核�
 1. 安装依赖：`pnpm install`。
 2. 创建 KV 和 D1，并把资源 ID 填入 `worker/wrangler.jsonc`。
 3. 执行 `worker/schema.sql` 初始化 D1。
-4. 使用 `wrangler secret put` 配置 `TELEGRAM_BOT_TOKEN`、`GITHUB_TOKEN`、`SERIAL_PEPPER` 和 `WEBHOOK_SECRET`。
+4. 使用 `wrangler secret put` 配置 `TELEGRAM_BOT_TOKEN`、`KERNEL_GITHUB_TOKEN`、`LKM_GITHUB_TOKEN`、`SERIAL_PEPPER` 和 `WEBHOOK_SECRET`。
 5. 执行 `pnpm run check:worker` 和 `pnpm run deploy:worker`。
 6. 将 Telegram webhook 指向 `/telegram/<WEBHOOK_SECRET>`，并同时设置同值的 `secret_token` 请求头校验。必须订阅 `message`、`callback_query` 和 `chat_join_request`；部署后访问 `/setup-webhook/<WEBHOOK_SECRET>` 可自动修正。
 

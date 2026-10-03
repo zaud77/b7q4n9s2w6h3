@@ -46,10 +46,10 @@ jobs:
               and .commandMenus == "commands:scoped-menus-v5"
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
-              and .kernelRepository == "zaud77/t8x3p6r9m2k7"
-              and .nomountRepository == "zaud77/nomount-lkm"
-              and .dailyBuildLimit == 1
-              and .quotaIncludesAdmins == true' <<<"$response"; then
+              and .kernelRepository == "zaud77/k6r9m2p7v4x8"
+              and .nomountRepository == "zaud77/m8v3p6r9x2k4"
+              and .dailyBuildLimit == 2
+              and .quotaIncludesAdmins == false' <<<"$response"; then
               exit 0
             fi
             echo "Waiting for the new Worker version (attempt $attempt/10)"

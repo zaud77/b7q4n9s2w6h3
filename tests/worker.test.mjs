@@ -20,8 +20,8 @@ async function fixture(t, overrides = {}) {
   const state = { bound: serial, enabled: true, member: true, count: 0, latest: null, sessions: new Map(), jobs: [], calls: [], dispatchStatus: 204, ...overrides };
   const env = { ADMIN_USER_IDS: "1", SERIAL_PEPPER: "fixture-pepper", GITHUB_TOKEN: "old-kernel-fixture-token",
     KERNEL_GITHUB_TOKEN: "new-kernel-fixture-token", LKM_GITHUB_TOKEN: "new-lkm-fixture-token",
-    GITHUB_REPO: "zaud77/t8x3p6r9m2k7", LKM_GITHUB_REPO: "zaud77/nomount-lkm",
-    LKM_GITHUB_REF: "main", GITHUB_REF: "main", TELEGRAM_BOT_TOKEN: "fixture", BUILD_COOLDOWN_SECONDS: "600", DAILY_BUILD_LIMIT: "1" };
+    GITHUB_REPO: "zaud77/k6r9m2p7v4x8", LKM_GITHUB_REPO: "zaud77/m8v3p6r9x2k4",
+    LKM_GITHUB_REF: "main", GITHUB_REF: "main", TELEGRAM_BOT_TOKEN: "fixture", BUILD_COOLDOWN_SECONDS: "600", DAILY_BUILD_LIMIT: "2" };
   const hash = await worker.digestSerial(env, serial);
   env.SERIALS = { async get(key) { return key === `serial:${hash}` && state.enabled ? { serial, enabled: true } : null; } };
   env.DB = { prepare(sql) {
@@ -109,7 +109,7 @@ test("payload uses SHA256 and the dedicated repository credential", async t => {
   const { env, state } = await fixture(t);
   await worker.dispatchNoMountBuild(env, query, session(), requestId);
   const [call] = dispatches(state);
-  assert.equal(call.url, "https://api.github.com/repos/zaud77/nomount-lkm/actions/workflows/lkm.yml/dispatches");
+  assert.equal(call.url, "https://api.github.com/repos/zaud77/m8v3p6r9x2k4/actions/workflows/lkm.yml/dispatches");
   assert.equal(call.options.headers.authorization, "Bearer new-lkm-fixture-token");
   assert.deepEqual(Object.keys(call.body.inputs).sort(), ["build_request_id", "device_serial_sha256"]);
   assert.equal(JSON.stringify(call.body).includes(serial), false);
@@ -124,7 +124,7 @@ test("concurrent repeat clicks cause only one dispatch", async t => {
   assert.equal(state.jobs.length, 1);
 });
 
-for (const [name, overrides] of [["daily quota", { count: 1 }], ["cooldown", { latest: Math.floor(Date.now() / 1000) }]]) {
+for (const [name, overrides] of [["daily quota", { count: 2 }], ["cooldown", { latest: Math.floor(Date.now() / 1000) }]]) {
   test(`${name} is shared with kernel builds`, async t => {
     const { env, state } = await fixture(t, overrides);
     await worker.dispatchNoMountBuild(env, query, session(), requestId);
@@ -164,7 +164,7 @@ test("successful delivery sends the inner installable ZIP, not the artifact wrap
   const payload = packageBytes(inputs.device_serial_sha256);
   const outer = zipSync({ "NoMount-Suite-v1.80-LKM.zip": payload });
   const job = { request_id: requestId, telegram_user_id: 42, chat_id: 42, workflow_file: "lkm.yml", github_run_id: 99,
-    inputs: JSON.stringify({ ...inputs, build_kind: "nomount-lkm", github_repo: "zaud77/nomount-lkm" }) };
+    inputs: JSON.stringify({ ...inputs, build_kind: "nomount-lkm", github_repo: "zaud77/m8v3p6r9x2k4" }) };
   state.jobs.push({ ...job, active_user_id: 42 });
   state.githubResponse = async url => {
     if (url.endsWith("/runs/99")) return Response.json({ status: "completed", conclusion: "success" });
@@ -184,7 +184,7 @@ test("kernel dispatch uses the migrated repository and credential", async t => {
   const { env, state } = await fixture(t);
   await worker.dispatchBuild(env, query, kernelSession());
   const [call] = dispatches(state);
-  assert.equal(call.url, "https://api.github.com/repos/zaud77/t8x3p6r9m2k7/actions/workflows/fastbuild_6.12.23_oneplus_15_hmbird_gold.yml/dispatches");
+  assert.equal(call.url, "https://api.github.com/repos/zaud77/k6r9m2p7v4x8/actions/workflows/fastbuild_6.12.23_oneplus_15_hmbird_gold.yml/dispatches");
   assert.equal(call.options.headers.authorization, "Bearer new-kernel-fixture-token");
   assert.equal(call.body.inputs.device_serial, serial);
   assert.equal(call.body.inputs.build_kind, undefined);
@@ -207,26 +207,55 @@ test("kernel and LKM share the same concurrent active slot", async t => {
   assert.equal(state.jobs.length, 1);
 });
 
-for (const admin of [false, true]) {
-  for (const kind of ["kernel", "lkm"]) {
-    test(`${admin ? "admin" : "regular user"} cannot make a second daily ${kind} build`, async t => {
-      const { env, state } = await fixture(t, { count: 1 });
-      if (admin) env.ADMIN_USER_IDS = "42";
-      if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
-      else await worker.dispatchNoMountBuild(env, query, session(), requestId);
-      assert.equal(dispatches(state).length, 0);
-      assert.equal(state.jobs.length, 0);
-      assert.ok(state.calls.some(call => call.body?.text?.includes("1 次构建上限")));
-    });
-  }
+test("admin quota exemption still permits only one concurrent active build", async t => {
+  const { env, state } = await fixture(t, { count: 99, latest: Math.floor(Date.now() / 1000) });
+  env.ADMIN_USER_IDS = "42";
+  await Promise.all([worker.dispatchBuild(env, query, kernelSession()), worker.dispatchNoMountBuild(env, query, session(), requestId)]);
+  assert.equal(dispatches(state).length, 1);
+  assert.equal(state.jobs.length, 1);
+  assert.equal(state.jobs[0].active_user_id, 42);
+});
+
+for (const kind of ["kernel", "lkm"]) {
+  test(`regular user cannot make a third daily ${kind} build`, async t => {
+    const { env, state } = await fixture(t, { count: 2 });
+    if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+    else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+    assert.equal(dispatches(state).length, 0);
+    assert.equal(state.jobs.length, 0);
+    assert.ok(state.calls.some(call => call.body?.text?.includes("2 次构建上限")));
+  });
+
+  test(`regular user can make a second daily ${kind} build`, async t => {
+    const { env, state } = await fixture(t, { count: 1 });
+    if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+    else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+    assert.equal(dispatches(state).length, 1);
+  });
+
+  test(`admin is exempt from daily ${kind} quota and cooldown`, async t => {
+    const { env, state } = await fixture(t, { count: 99, latest: Math.floor(Date.now() / 1000) });
+    env.ADMIN_USER_IDS = "42";
+    if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+    else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+    assert.equal(dispatches(state).length, 1);
+  });
+
+  test(`admin exemption does not bypass ${kind} authorization`, async t => {
+    const { env, state } = await fixture(t, { count: 99, enabled: false });
+    env.ADMIN_USER_IDS = "42";
+    if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+    else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+    assert.equal(dispatches(state).length, 0);
+  });
 }
 
-test("default limit is one and obsolete bonus does not grant extra builds", async t => {
-  const { env } = await fixture(t, { count: 1 });
+test("default limit is two and obsolete bonus does not grant extra builds", async t => {
+  const { env } = await fixture(t, { count: 2 });
   delete env.DAILY_BUILD_LIMIT;
   env.DAILY_BUILD_BONUS_DATE = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
   env.DAILY_BUILD_BONUS = "99";
-  assert.match(await worker.buildQuotaMessage(env, 42), /1 次构建上限/);
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
 });
 
 test("quota rolls at Beijing midnight, not UTC midnight", () => {
@@ -259,7 +288,7 @@ test("kernel never falls back to old or LKM credentials", async t => {
 
 test("kernel monitoring uses the repository recorded with the job", async t => {
   const { env, state } = await fixture(t);
-  env.GITHUB_REPO = "zaud77/t8x3p6r9m2k7";
+  env.GITHUB_REPO = "zaud77/k6r9m2p7v4x8";
   const job = { request_id: requestId, chat_id: 42, workflow_file: "kernel.yml", github_run_id: 99,
     inputs: JSON.stringify({ build_kind: "kernel", github_repo: "zaominn/t8x3p6r9m2k7" }) };
   state.githubResponse = async url => {
@@ -272,10 +301,10 @@ test("kernel monitoring uses the repository recorded with the job", async t => {
 
 test("production configuration uses zaud77 repositories and one shared quota", async () => {
   const config = JSON.parse(await readFile(new URL("../worker/wrangler.jsonc", import.meta.url), "utf8"));
-  assert.equal(config.vars.GITHUB_REPO, "zaud77/t8x3p6r9m2k7");
-  assert.equal(config.vars.DAILY_BUILD_LIMIT, "1");
+  assert.equal(config.vars.GITHUB_REPO, "zaud77/k6r9m2p7v4x8");
+  assert.equal(config.vars.DAILY_BUILD_LIMIT, "2");
   assert.equal(config.vars.DAILY_BUILD_BONUS, undefined);
-  assert.equal(config.vars.LKM_GITHUB_REPO, "zaud77/nomount-lkm");
+  assert.equal(config.vars.LKM_GITHUB_REPO, "zaud77/m8v3p6r9x2k4");
 });
 
 test("health reports deployed repository bindings without exposing credentials", async t => {
@@ -283,11 +312,12 @@ test("health reports deployed repository bindings without exposing credentials",
   const response = await worker.default.fetch(new Request("https://fixture.invalid/health"), env, {});
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.kernelRepository, "zaud77/t8x3p6r9m2k7");
-  assert.equal(body.nomountRepository, "zaud77/nomount-lkm");
+  assert.equal(body.kernelRepository, "zaud77/k6r9m2p7v4x8");
+  assert.equal(body.nomountRepository, "zaud77/m8v3p6r9x2k4");
   assert.equal(body.kernelBuildsReady, true);
   assert.equal(body.nomountBuildsReady, true);
-  assert.equal(body.dailyBuildLimit, 1);
+  assert.equal(body.dailyBuildLimit, 2);
+  assert.equal(body.quotaIncludesAdmins, false);
   assert.equal(state.jobs.length, 0);
   assert.equal(state.calls.length, 0);
   assert.equal(JSON.stringify(body).includes("fixture-token"), false);

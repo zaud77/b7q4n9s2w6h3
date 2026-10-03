@@ -47,11 +47,11 @@ class Settings:
             required_channel_url=os.environ.get("REQUIRED_CHANNEL_URL", "").strip(),
             github_token=github_token,
             github_use_gh_cli=github_use_gh_cli,
-            github_repo=os.environ.get("GITHUB_REPO", "zaud77/t8x3p6r9m2k7").strip(),
+            github_repo=os.environ.get("GITHUB_REPO", "zaud77/k6r9m2p7v4x8").strip(),
             github_ref=os.environ.get("GITHUB_REF", "main").strip(),
             serial_pepper=_required("SERIAL_PEPPER"),
             database_path=os.environ.get("DATABASE_PATH", "data/bot.db").strip(),
             admin_user_ids=admins,
             cooldown_seconds=int(os.environ.get("BUILD_COOLDOWN_SECONDS", "600")),
-            daily_build_limit=int(os.environ.get("DAILY_BUILD_LIMIT", "1")),
+            daily_build_limit=int(os.environ.get("DAILY_BUILD_LIMIT", "2")),
         )
