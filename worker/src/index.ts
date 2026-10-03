@@ -146,6 +146,7 @@ const BBR_VALUES = ["false", "true", "default"];
 const DROID_VALUES = ["false", "standard", "extend"];
 const KOWSU_LATEST_RELEASE_API = "https://api.github.com/repos/zaominn/KowSU/releases/latest";
 const KOWSU_MANAGER_ASSET = /^KowSU-Manager-.*\.apk$/i;
+const NOMOUNT_PACKAGE_RE = /^NoMount-Suite-v([0-9]+(?:\.[0-9]+)*)-LKM(?:-[A-Za-z0-9._-]+)?\.zip$/i;
 
 function now(): number { return Math.floor(Date.now() / 1000); }
 function admins(env: Env): Set<number> {
@@ -807,13 +808,13 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
       await sendMessage(env, chatId, "请先使用 /start 绑定有效序列号并完成入群验证。"); return;
     }
     if (!env.LKM_GITHUB_TOKEN) {
-      await sendMessage(env, chatId, "独立模块构建凭据尚未配置，请联系管理员。"); return;
+      await sendMessage(env, chatId, "服务暂不可用，请稍后重试。"); return;
     }
     const nomountRequestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
     await setSession(env, userId, { serial: boundSerial, nomountRequestId });
     await sendMessage(env, chatId,
-      `构建 NoMount Suite LKM，绑定设备尾号 ${boundSerial.slice(-4)}。\n目前适配 ARM64、Android 16 及以上、Linux 6.12；原厂内核加载仍需实机验证。\n不改变你的内核构建脚本绑定；本次成功构建使用现有配额。`,
-      { inline_keyboard: [[{ text: "🚀 构建 NoMount LKM", callback_data: `nomount:${nomountRequestId}` }], [{ text: "取消", callback_data: "cancel" }]] });
+      `构建 NoMount LKM（设备尾号 ${boundSerial.slice(-4)}）？`,
+      { inline_keyboard: [[{ text: "开始构建", callback_data: `nomount:${nomountRequestId}` }], [{ text: "取消", callback_data: "cancel" }]] });
     return;
   }
   if (command === "build") {
@@ -965,7 +966,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
-  if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "内核构建凭据尚未配置，请联系管理员。"); return; }
+  if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "服务暂不可用，请稍后重试。"); return; }
   const stored = { ...inputs, build_kind: "kernel", github_repo: env.GITHUB_REPO };
   const created = now();
   try {
@@ -982,16 +983,16 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     });
   } catch {
     await clearSession(env, userId);
-    await editMessage(env, chatId, messageId, "提交响应超时，机器人会按请求编号查询结果，请勿重复提交。"); return;
+    await editMessage(env, chatId, messageId, "提交处理中，请勿重复提交。"); return;
   }
   if (response.status !== 204) {
     console.error("Kernel dispatch rejected", response.status);
     await finishJob(env, requestId, "failed");
-    await clearSession(env, userId); await editMessage(env, chatId, messageId, "GitHub 未接受本次构建，请联系管理员。"); return;
+    await clearSession(env, userId); await editMessage(env, chatId, messageId, "提交失败，请稍后重试。"); return;
   }
   try { await saveBuildPreferences(env, userId, selectedOptions, isAdmin(env, userId)); }
   catch (error) { console.error("save build preferences failed", userId, String(error)); }
-  await clearSession(env, userId); await editMessage(env, chatId, messageId, "构建已提交，请等待完成。完成后机器人会直接发送刷机包。");
+  await clearSession(env, userId); await editMessage(env, chatId, messageId, "已提交，完成后自动发包。");
 }
 
 async function buildQuotaMessage(env: Env, userId: number): Promise<string | null> {
@@ -1014,7 +1015,7 @@ async function buildQuotaMessage(env: Env, userId: number): Promise<string | nul
 async function nomountInputs(serial: string, requestId: string): Promise<Record<string, string>> {
   if (!SERIAL_RE.test(serial) || !/^[a-f0-9]{16}$/.test(requestId)) throw new Error("invalid device build input");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(serial));
-  return { device_serial_sha256: Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, "0")).join(""), build_request_id: requestId };
+  return { device_serial: serial, device_serial_sha256: Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, "0")).join(""), build_request_id: requestId };
 }
 
 async function dispatchNoMountBuild(env: Env, query: any, session: Session, requestId: string) {
@@ -1030,7 +1031,7 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
     await clearSession(env, userId); await reject("序列号或成员授权复核失败，未触发构建。"); return;
   }
   if (!env.LKM_GITHUB_TOKEN || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.LKM_GITHUB_REPO || "")) {
-    await reject("独立模块构建凭据或仓库尚未配置，请联系管理员。"); return;
+    await reject("服务暂不可用，请稍后重试。"); return;
   }
   const quotaMessage = await buildQuotaMessage(env, userId);
   if (quotaMessage) { await reject(quotaMessage); return; }
@@ -1053,15 +1054,15 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
     });
   } catch {
     await clearSession(env, userId);
-    await reject("提交响应超时，机器人会按请求编号查询结果，请勿重复提交。"); return;
+    await reject("提交处理中，请勿重复提交。"); return;
   }
   if (response.status !== 204) {
     console.error("NoMount dispatch rejected", response.status);
     await finishJob(env, requestId, "failed");
-    await clearSession(env, userId); await reject("GitHub 未接受本次构建，请联系管理员。"); return;
+    await clearSession(env, userId); await reject("提交失败，请稍后重试。"); return;
   }
   await clearSession(env, userId);
-  await reject("NoMount LKM 构建已提交，绑定你自己的设备。完成后将私聊发送模块 ZIP。");
+  await reject("已提交，完成后自动发包。");
 }
 
 async function handleCallback(env: Env, update: any) {
@@ -1337,7 +1338,7 @@ async function processJob(env: Env, job: any) {
     if (!response.ok) throw new Error(`run ${response.status}`); run = await response.json();
   }
   if (run.status !== "completed") return;
-  if (run.conclusion !== "success") { await sendMessage(env, job.chat_id, "本次构建失败，请联系管理员。"); await finishJob(env, job.request_id, "failed", runId); return; }
+  if (run.conclusion !== "success") { await sendMessage(env, job.chat_id, "构建失败，请稍后重试。"); await finishJob(env, job.request_id, "failed", runId); return; }
   const claimed = await env.DB.prepare(
     "UPDATE build_jobs SET status='delivering',succeeded_at=COALESCE(succeeded_at,?),updated_at=? " +
     "WHERE request_id=? AND (status IN ('running','delivery_pending') OR (status='delivering' AND updated_at<=?))"
@@ -1350,11 +1351,15 @@ async function processJob(env: Env, job: any) {
     if (!artifact) throw new Error("NoMount module artifact missing");
     const download = await fetch(artifact.archive_download_url, { headers, redirect: "follow" });
     if (!download.ok) throw new Error(`NoMount artifact download ${download.status}`);
-    const module = unwrapArtifact(new Uint8Array(await download.arrayBuffer()), /^NoMount-Suite-v[0-9.]+-LKM\.zip$/);
+    const module = unwrapArtifact(new Uint8Array(await download.arrayBuffer()), NOMOUNT_PACKAGE_RE);
     if (!module) throw new Error("Expected one installable NoMount module ZIP");
     validateNoMountPackage(module.bytes, inputs.device_serial_sha256);
-    await sendDocument(env, Number(job.chat_id), module.name, module.bytes,
-      "NoMount LKM 已构建完成，仅绑定你自己的设备。原厂内核加载兼容性仍需实机确认。");
+    const serial = String(inputs.device_serial || await serialForUser(env, Number(job.telegram_user_id)) || "");
+    const serialMatches = SERIAL_RE.test(serial) && (await nomountInputs(serial, job.request_id)).device_serial_sha256 === inputs.device_serial_sha256;
+    const filename = serialMatches
+      ? module.name.replace(NOMOUNT_PACKAGE_RE, (_name, version) => `NoMount-Suite-v${version}-LKM-${serial.replace(/[^A-Za-z0-9._-]/g, "_")}.zip`)
+      : module.name;
+    await sendDocument(env, Number(job.chat_id), filename, module.bytes, "构建完成。");
     await finishJob(env, job.request_id, "sent", runId); return;
   }
   const kowsuRequested = ["kowsu", "kowx"].includes(String(inputs.ksu_type || "").toLowerCase());
@@ -1393,6 +1398,7 @@ function validateNoMountPackage(bytes: Uint8Array, serialDigest: string) {
   const binding = files["lkm/binding.conf"] ? strFromU8(files["lkm/binding.conf"]) : "";
   const lines = new Set(binding.trim().split(/\r?\n/));
   if (!lines.has("smoke_only=0") || !lines.has(`serial_sha256=${serialDigest}`)) throw new Error("Wrong device or smoke package");
+  if (lines.has("diagnostic=1")) throw new Error("Diagnostic package cannot be delivered as a normal build");
   const modules = Array.from(entries.keys()).filter(name => name.endsWith(".ko"));
   if (modules.length !== 1 || modules[0] !== "lkm/nomount.ko") throw new Error("Expected one NoMount KO");
   for (const name of ["lkm/nomount.ko", "classes.dex", "zygisk/arm64-v8a.so", "module.prop"]) {

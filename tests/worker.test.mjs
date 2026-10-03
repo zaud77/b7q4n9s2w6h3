@@ -9,7 +9,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds };";
+  + "\nexport { handleCommand, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -45,6 +45,14 @@ async function fixture(t, overrides = {}) {
           if (state.jobs.some(job => job.active_user_id === values[2] || job.request_id === values[0])) throw new Error("unique job constraint");
           state.jobs.push({ request_id: values[0], telegram_user_id: values[1], active_user_id: values[2], chat_id: values[3], workflow_file: values[4], inputs: values[5], status: "submitted", created_at: values[6] });
         }
+        if (sql.includes("SET status='delivering'")) {
+          const job = state.jobs.find(item => item.request_id === values[2]);
+          if (!job || !(job.status === "running" || job.status === "delivery_pending" ||
+              (job.status === "delivering" && job.updated_at <= values[3]))) return { meta: { changes: 0 } };
+          job.status = "delivering";
+          job.succeeded_at ??= values[0];
+          job.updated_at = values[1];
+        }
         if (sql.includes("SET status=?,active_user_id=NULL")) {
           const job = state.jobs.find(item => item.request_id === values[3]);
           if (job) { job.status = values[0]; job.active_user_id = null; }
@@ -61,7 +69,10 @@ async function fixture(t, overrides = {}) {
       const result = String(url).endsWith("getChatMember") ? { status: state.member ? "member" : "left" } : { chat: { type: "private", id: 42 }, message_id: 8 };
       return Response.json({ ok: true, result });
     }
-    if (String(url).endsWith("/dispatches")) return new Response(null, { status: state.dispatchStatus });
+    if (String(url).endsWith("/dispatches")) {
+      if (state.dispatchError) throw state.dispatchError;
+      return new Response(null, { status: state.dispatchStatus });
+    }
     if (state.githubResponse) return state.githubResponse(String(url), options);
     throw new Error("Unexpected fixture HTTP request");
   };
@@ -78,6 +89,38 @@ function packageBytes(digest, extra = {}) {
     "zygisk/arm64-v8a.so": strToU8("fixture-bridge"), "module.prop": strToU8("version=1.80\n"), ...extra });
 }
 
+function assertPrivateMessages(state) {
+  for (const call of state.calls.filter(call => call.url.includes("api.telegram.org"))) {
+    const body = call.body;
+    const texts = body instanceof FormData ? [body.get("caption")] :
+      [body?.text, ...(body?.reply_markup?.inline_keyboard || []).flat().map(button => button.text)];
+    for (const text of texts.filter(value => typeof value === "string")) {
+      assert.doesNotMatch(text, /github|actions|仓库|工作流|zaud77|m8v3p6r9x2k4|k6r9m2p7v4x8/i);
+    }
+  }
+}
+
+async function deliveryFixture(t, options = {}) {
+  const { filename, digestOnly, packageOverride, conclusion = "success", ...overrides } = options;
+  const { env, state } = await fixture(t, overrides);
+  const inputs = await worker.nomountInputs(serial, requestId);
+  if (digestOnly) delete inputs.device_serial;
+  const payload = packageOverride || packageBytes(inputs.device_serial_sha256);
+  const name = filename || `NoMount-Suite-v1.80-LKM-${serial}.zip`;
+  const outer = zipSync({ [name]: payload });
+  const job = { request_id: requestId, telegram_user_id: 42, chat_id: 42, workflow_file: "lkm.yml", github_run_id: 99,
+    status: "delivery_pending", active_user_id: 42,
+    inputs: JSON.stringify({ ...inputs, build_kind: "nomount-lkm", github_repo: "zaud77/m8v3p6r9x2k4" }) };
+  state.jobs.push(job);
+  state.githubResponse = async url => {
+    if (url.endsWith("/runs/99")) return Response.json({ status: "completed", conclusion });
+    if (url.endsWith("/artifacts")) return Response.json({ artifacts: [{ name: "nomount-suite-lkm", archive_download_url: "https://api.github.com/download/fixture" }] });
+    if (url.endsWith("/download/fixture")) return new Response(outer);
+    throw new Error("Unexpected fixture request");
+  };
+  return { env, state, job, payload, outer, name };
+}
+
 test("bound users get a private, serial-free confirmation", async t => {
   const { env, state } = await fixture(t);
   await worker.handleCommand(env, { message: { from: { id: 42 }, chat: { id: 42, type: "private" } } }, "nomount", []);
@@ -85,7 +128,11 @@ test("bound users get a private, serial-free confirmation", async t => {
   assert.equal(saved.serial, serial);
   assert.match(saved.nomountRequestId, /^[a-f0-9]{16}$/);
   assert.equal(dispatches(state).length, 0);
-  assert.ok(state.calls.some(call => call.body?.text?.includes("NoMount Suite LKM")));
+  const prompt = state.calls.find(call => call.body?.text?.includes("NoMount LKM")).body.text;
+  assert.ok(prompt.length < 50);
+  assert.equal(prompt.includes("\n"), false);
+  assert.equal(prompt.includes(serial), false);
+  assertPrivateMessages(state);
 });
 
 for (const [name, overrides] of [["unbound user", { bound: null }], ["revoked serial", { enabled: false }], ["non-member", { member: false }]]) {
@@ -105,16 +152,18 @@ test("another serial, stale button, or group cannot dispatch", async t => {
   assert.equal(dispatches(state).length, 0);
 });
 
-test("payload uses SHA256 and the dedicated repository credential", async t => {
+test("payload includes the bound serial for display and its SHA256 for validation", async t => {
   const { env, state } = await fixture(t);
   await worker.dispatchNoMountBuild(env, query, session(), requestId);
   const [call] = dispatches(state);
   assert.equal(call.url, "https://api.github.com/repos/zaud77/m8v3p6r9x2k4/actions/workflows/lkm.yml/dispatches");
   assert.equal(call.options.headers.authorization, "Bearer new-lkm-fixture-token");
-  assert.deepEqual(Object.keys(call.body.inputs).sort(), ["build_request_id", "device_serial_sha256"]);
-  assert.equal(JSON.stringify(call.body).includes(serial), false);
-  assert.equal(state.jobs[0].inputs.includes(serial), false);
+  assert.deepEqual(Object.keys(call.body.inputs).sort(), ["build_request_id", "device_serial", "device_serial_sha256"]);
+  assert.equal(call.body.inputs.device_serial, serial);
+  assert.equal(JSON.parse(state.jobs[0].inputs).device_serial, serial);
   assert.equal(state.jobs[0].chat_id, 42);
+  assert.equal(state.calls.at(-1).body.text, "已提交，完成后自动发包。");
+  assertPrivateMessages(state);
 });
 
 test("concurrent repeat clicks cause only one dispatch", async t => {
@@ -156,29 +205,93 @@ test("delivery refuses wrong bindings, smoke packages and extra KOs", async () =
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "second.ko": strToU8("extra") }), digest));
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "lkm/binding.conf": strToU8("a".repeat(4097)) }), digest));
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "classes.dex": new Uint8Array() }), digest));
+  assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "lkm/binding.conf": strToU8(`smoke_only=0\nserial_sha256=${digest}\ndiagnostic=1\n`) }), digest));
 });
 
 test("successful delivery sends the inner installable ZIP, not the artifact wrapper", async t => {
-  const { env, state } = await fixture(t);
-  const inputs = await worker.nomountInputs(serial, requestId);
-  const payload = packageBytes(inputs.device_serial_sha256);
-  const outer = zipSync({ "NoMount-Suite-v1.80-LKM.zip": payload });
-  const job = { request_id: requestId, telegram_user_id: 42, chat_id: 42, workflow_file: "lkm.yml", github_run_id: 99,
-    inputs: JSON.stringify({ ...inputs, build_kind: "nomount-lkm", github_repo: "zaud77/m8v3p6r9x2k4" }) };
-  state.jobs.push({ ...job, active_user_id: 42 });
-  state.githubResponse = async url => {
-    if (url.endsWith("/runs/99")) return Response.json({ status: "completed", conclusion: "success" });
-    if (url.endsWith("/artifacts")) return Response.json({ artifacts: [{ name: "nomount-suite-lkm", archive_download_url: "https://api.github.com/download/fixture" }] });
-    if (url.endsWith("/download/fixture")) return new Response(outer);
-    throw new Error("Unexpected GitHub fixture request");
-  };
+  const { env, state, job, payload } = await deliveryFixture(t);
   await worker.processJob(env, job);
   const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
-  assert.equal(sent.body.get("document").name, "NoMount-Suite-v1.80-LKM.zip");
+  assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-${serial}.zip`);
+  assert.equal(sent.body.get("caption"), "构建完成。");
   assert.deepEqual(new Uint8Array(await sent.body.get("document").arrayBuffer()), payload);
   assert.equal(state.jobs[0].status, "sent");
+  assert.equal(state.jobs[0].active_user_id, null);
+  assert.ok(state.jobs[0].succeeded_at);
+  assertPrivateMessages(state);
   assert.ok(state.calls.filter(call => call.url.includes("api.github.com")).every(call => call.options.headers.authorization === "Bearer new-lkm-fixture-token"));
 });
+
+test("legacy hash-only pending job delivers with its verified bound serial", async t => {
+  const inputs = await worker.nomountInputs(serial, requestId);
+  const filename = `NoMount-Suite-v1.80-LKM-SHA256-${inputs.device_serial_sha256.slice(0, 16)}.zip`;
+  const { env, state, job, payload } = await deliveryFixture(t, { filename, digestOnly: true });
+  await worker.processJob(env, job);
+  const document = state.calls.find(call => call.url.endsWith("/sendDocument")).body.get("document");
+  assert.equal(document.name, `NoMount-Suite-v1.80-LKM-${serial}.zip`);
+  assert.deepEqual(new Uint8Array(await document.arrayBuffer()), payload);
+  assert.equal(job.status, "sent");
+  assert.equal(job.active_user_id, null);
+  await worker.processJob(env, job);
+  assert.equal(state.calls.filter(call => call.url.endsWith("/sendDocument")).length, 1);
+});
+
+for (const bound of [null, "OTHER_DEVICE_456"]) {
+  test(`legacy package keeps its original name when binding is ${bound ? "changed" : "missing"}`, async t => {
+    const inputs = await worker.nomountInputs(serial, requestId);
+    const filename = `NoMount-Suite-v1.80-LKM-SHA256-${inputs.device_serial_sha256.slice(0, 16)}.zip`;
+    const { env, state, job } = await deliveryFixture(t, { filename, digestOnly: true, bound });
+    await worker.processJob(env, job);
+    const document = state.calls.find(call => call.url.endsWith("/sendDocument")).body.get("document");
+    assert.equal(document.name, filename);
+    assert.equal(job.status, "sent");
+  });
+}
+
+test("artifact matching accepts legacy and serial names but refuses ambiguous wrappers", () => {
+  const payload = strToU8("fixture-module");
+  const legacy = zipSync({ "NoMount-Suite-v1.80-LKM.zip": payload });
+  assert.deepEqual(worker.unwrapArtifact(legacy, worker.NOMOUNT_PACKAGE_RE)?.bytes, payload);
+  assert.equal(worker.unwrapArtifact(zipSync({ "unrelated.zip": payload }), worker.NOMOUNT_PACKAGE_RE), null);
+  const ambiguous = zipSync({ "NoMount-Suite-v1.80-LKM-DEVICE_A.zip": payload, "NoMount-Suite-v1.80-LKM-DEVICE_B.zip": payload });
+  assert.equal(worker.unwrapArtifact(ambiguous, worker.NOMOUNT_PACKAGE_RE), null);
+});
+
+test("wrong-device packages are not sent even when their filenames match", async t => {
+  const { env, state, job } = await deliveryFixture(t, { packageOverride: packageBytes("b".repeat(64)) });
+  await assert.rejects(worker.processJob(env, job), /Wrong device/);
+  assert.equal(state.calls.filter(call => call.url.endsWith("/sendDocument")).length, 0);
+});
+
+test("failed build sends a concise message without platform details", async t => {
+  const { env, state, job } = await deliveryFixture(t, { conclusion: "failure" });
+  await worker.processJob(env, job);
+  assert.equal(state.calls.at(-1).body.text, "构建失败，请稍后重试。");
+  assert.equal(job.status, "failed");
+  assert.equal(job.active_user_id, null);
+  assertPrivateMessages(state);
+});
+
+for (const kind of ["kernel", "lkm"]) {
+  for (const dispatchStatus of [403, 404, 500]) {
+    test(`${kind} dispatch error ${dispatchStatus} exposes no platform details`, async t => {
+      const { env, state } = await fixture(t, { dispatchStatus });
+      if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+      else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+      assert.equal(state.calls.at(-1).body.text, "提交失败，请稍后重试。");
+      assertPrivateMessages(state);
+    });
+  }
+  test(`${kind} dispatch timeout keeps its reservation without exposing the internal error`, async t => {
+    const { env, state } = await fixture(t, { dispatchError: new Error("GitHub https://api.github.com internal detail") });
+    if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+    else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+    assert.equal(state.calls.at(-1).body.text, "提交处理中，请勿重复提交。");
+    assert.equal(state.jobs[0].status, "submitted");
+    assert.equal(state.jobs[0].active_user_id, 42);
+    assertPrivateMessages(state);
+  });
+}
 
 test("kernel dispatch uses the migrated repository and credential", async t => {
   const { env, state } = await fixture(t);

@@ -886,7 +886,7 @@ class KernelBuildBot:
             )
             return
         if workflow_key not in WORKFLOWS:
-            await query.edit_message_text("未选择有效工作流。")
+            await query.edit_message_text("请重新选择构建配置。")
             return
         if self.db.workflow_maintenance(workflow_key):
             await query.edit_message_text(
@@ -935,7 +935,7 @@ class KernelBuildBot:
                     stdout.decode(errors="replace"),
                     stderr.decode(errors="replace"),
                 )
-                await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
+                await query.edit_message_text("提交失败，请稍后重试。")
                 return
         else:
             endpoint = f"https://api.github.com/repos/{self.settings.github_repo}/actions/workflows/{workflow}/dispatches"
@@ -952,7 +952,7 @@ class KernelBuildBot:
                 )
             if response.status_code != 204:
                 logging.error("GitHub dispatch failed: %s %s", response.status_code, response.text)
-                await query.edit_message_text("GitHub 构建触发失败，请联系管理员。")
+                await query.edit_message_text("提交失败，请稍后重试。")
                 return
         serialized_inputs = json.dumps(inputs, sort_keys=True)
         self.db.record_build(user_id, serial, workflow, serialized_inputs)
@@ -966,7 +966,7 @@ class KernelBuildBot:
             ),
         )
         context.user_data.clear()
-        await query.edit_message_text("构建已提交，请等待完成。完成后机器人会直接发送刷机包。")
+        await query.edit_message_text("已提交，完成后自动发包。")
 
     def github_headers(self) -> dict[str, str]:
         return {
@@ -1105,7 +1105,7 @@ class KernelBuildBot:
                 self.db.update_build_job(request_id, "running", run_id)
                 return
             if run.get("conclusion") != "success":
-                await application.bot.send_message(job["chat_id"], "本次构建失败，请联系管理员。")
+                await application.bot.send_message(job["chat_id"], "构建失败，请稍后重试。")
                 self.db.update_build_job(request_id, "failed", run_id)
                 return
 

@@ -344,4 +344,4 @@ def test_dispatch_quota_is_enforced_only_for_regular_users():
         context = SimpleNamespace(user_data={"serial": "TEST_DEVICE_123"})
         asyncio.run(bot.dispatch(query, context))
         assert len(messages) == 1
-        assert ("未选择有效工作流" if admin else "2 次构建上限") in messages[0]
+        assert ("请重新选择构建配置" if admin else "2 次构建上限") in messages[0]
