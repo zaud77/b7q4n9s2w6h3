@@ -129,6 +129,7 @@ test("bound users get a private, serial-free confirmation", async t => {
   assert.match(saved.nomountRequestId, /^[a-f0-9]{16}$/);
   assert.equal(dispatches(state).length, 0);
   const prompt = state.calls.find(call => call.body?.text?.includes("NoMount LKM")).body.text;
+  assert.equal(prompt, "构建 NoMount LKM？");
   assert.ok(prompt.length < 50);
   assert.equal(prompt.includes("\n"), false);
   assert.equal(prompt.includes(serial), false);

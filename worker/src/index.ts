@@ -813,7 +813,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const nomountRequestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
     await setSession(env, userId, { serial: boundSerial, nomountRequestId });
     await sendMessage(env, chatId,
-      `构建 NoMount LKM（设备尾号 ${boundSerial.slice(-4)}）？`,
+      "构建 NoMount LKM？",
       { inline_keyboard: [[{ text: "开始构建", callback_data: `nomount:${nomountRequestId}` }], [{ text: "取消", callback_data: "cancel" }]] });
     return;
   }
