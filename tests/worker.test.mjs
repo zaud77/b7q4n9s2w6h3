@@ -88,6 +88,12 @@ function packageBytes(digest, extra = {}) {
     "lkm/nomount.ko": strToU8("fixture-ko"), "classes.dex": strToU8("fixture-dex"),
     "zygisk/arm64-v8a.so": strToU8("fixture-bridge"), "module.prop": strToU8("version=1.80\n"), ...extra });
 }
+function embeddedPackageBytes(digest, properties = "", extra = {}) {
+  const files = { "lkm/nomount.ko": strToU8("fixture-ko"), "classes.dex": strToU8("fixture-dex"),
+    "zygisk/arm64-v8a.so": strToU8("fixture-bridge"),
+    "module.prop": strToU8(properties || `version=1.80\nnomount_binding=${"a".repeat(64)}\nnomount_serial_sha256=${digest}\nnomount_smoke_only=0\nnomount_diagnostic=0\nnomount_stage=full\nnomount_kmi=android16-6.12\n`), ...extra };
+  return zipSync(files);
+}
 
 function assertPrivateMessages(state) {
   for (const call of state.calls.filter(call => call.url.includes("api.telegram.org"))) {
@@ -207,6 +213,29 @@ test("delivery refuses wrong bindings, smoke packages and extra KOs", async () =
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "lkm/binding.conf": strToU8("a".repeat(4097)) }), digest));
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "classes.dex": new Uint8Array() }), digest));
   assert.throws(() => worker.validateNoMountPackage(packageBytes(digest, { "lkm/binding.conf": strToU8(`smoke_only=0\nserial_sha256=${digest}\ndiagnostic=1\n`) }), digest));
+});
+
+test("embedded module properties replace binding.conf without weakening delivery checks", async () => {
+  const digest = (await worker.nomountInputs(serial, requestId)).device_serial_sha256;
+  const valid = `version=1.80\nnomount_binding=${"a".repeat(64)}\nnomount_serial_sha256=${digest}\nnomount_smoke_only=0\nnomount_diagnostic=0\nnomount_stage=full\nnomount_kmi=android16-6.12\n`;
+  assert.doesNotThrow(() => worker.validateNoMountPackage(embeddedPackageBytes(digest), digest));
+  for (const properties of [valid.replace(digest, "b".repeat(64)), valid.replace("nomount_smoke_only=0", "nomount_smoke_only=1"),
+    valid.replace("nomount_diagnostic=0", "nomount_diagnostic=1"), valid.replace("nomount_stage=full", "nomount_stage=core"),
+    valid.replace("nomount_kmi=android16-6.12", "nomount_kmi=other"), valid.replace("nomount_binding=", "nomount_binding=invalid"),
+    valid.replace("nomount_smoke_only=0\n", ""), valid + "nomount_smoke_only=0\n", "x".repeat(4097)]) {
+    assert.throws(() => worker.validateNoMountPackage(embeddedPackageBytes(digest, properties), digest));
+  }
+  assert.throws(() => worker.validateNoMountPackage(embeddedPackageBytes(digest, valid, {"lkm/binding.conf":strToU8(`smoke_only=0\nserial_sha256=${digest}\n`)}), digest));
+  assert.throws(() => worker.validateNoMountPackage(embeddedPackageBytes(digest, valid, {"second.ko":strToU8("extra")}), digest));
+});
+
+test("embedded package metadata is delivered without a separate binding file", async t => {
+  const digest = (await worker.nomountInputs(serial, requestId)).device_serial_sha256;
+  const {env,state,job,payload} = await deliveryFixture(t, {packageOverride:embeddedPackageBytes(digest)});
+  await worker.processJob(env,job);
+  const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
+  assert.deepEqual(new Uint8Array(await sent.body.get("document").arrayBuffer()), payload);
+  assert.equal(state.jobs[0].status, "sent");
 });
 
 test("successful delivery sends the inner installable ZIP, not the artifact wrapper", async t => {

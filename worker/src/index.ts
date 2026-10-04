@@ -1393,12 +1393,24 @@ function validateNoMountPackage(bytes: Uint8Array, serialDigest: string) {
   const files = unzipSync(bytes, { filter(file) {
     if (entries.has(file.name)) throw new Error("Duplicate package entry");
     entries.set(file.name, file.originalSize);
-    return file.name === "lkm/binding.conf" && file.originalSize <= 4096;
+    return ["module.prop", "lkm/binding.conf"].includes(file.name) && file.originalSize <= 4096;
   } });
-  const binding = files["lkm/binding.conf"] ? strFromU8(files["lkm/binding.conf"]) : "";
-  const lines = new Set(binding.trim().split(/\r?\n/));
-  if (!lines.has("smoke_only=0") || !lines.has(`serial_sha256=${serialDigest}`)) throw new Error("Wrong device or smoke package");
-  if (lines.has("diagnostic=1")) throw new Error("Diagnostic package cannot be delivered as a normal build");
+  const properties = files["module.prop"] ? strFromU8(files["module.prop"]) : "";
+  const embedded = properties.split(/\r?\n/).filter(line => line.startsWith("nomount_"));
+  const binding = embedded.length ? embedded.map(line => line.slice("nomount_".length)).join("\n")
+    : files["lkm/binding.conf"] ? strFromU8(files["lkm/binding.conf"]) : "";
+  if (embedded.length && entries.has("lkm/binding.conf")) throw new Error("Conflicting package metadata");
+  const values = new Map<string, string>();
+  for (const line of binding.split(/\r?\n/).filter(Boolean)) {
+    const match = line.match(/^([^=]+)=([^=]*)$/);
+    if (!match || values.has(match[1])) throw new Error("Invalid or duplicate package metadata");
+    values.set(match[1], match[2]);
+  }
+  if (values.get("smoke_only") !== "0" || values.get("serial_sha256") !== serialDigest) throw new Error("Wrong device or smoke package");
+  if (values.get("diagnostic") === "1") throw new Error("Diagnostic package cannot be delivered as a normal build");
+  if (embedded.length && (values.size !== 6 || !/^[a-f0-9]{64}$/.test(values.get("binding") || "") ||
+    values.get("kmi") !== "android16-6.12" || values.get("diagnostic") !== "0" || values.get("stage") !== "full"))
+    throw new Error("Invalid embedded package metadata");
   const modules = Array.from(entries.keys()).filter(name => name.endsWith(".ko"));
   if (modules.length !== 1 || modules[0] !== "lkm/nomount.ko") throw new Error("Expected one NoMount KO");
   for (const name of ["lkm/nomount.ko", "classes.dex", "zygisk/arm64-v8a.so", "module.prop"]) {
