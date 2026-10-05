@@ -9,7 +9,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE };";
+  + "\nexport { handleCommand, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -334,6 +334,11 @@ test("kernel dispatch uses the migrated repository and credential", async t => {
   assert.equal(call.body.inputs.github_repo, undefined);
   assert.equal(JSON.parse(state.jobs[0].inputs).github_repo, env.GITHUB_REPO);
   assert.equal(state.jobs[0].chat_id, 42);
+});
+
+test("BakaSU is the default kernel manager and old ReSukiSU preferences migrate", () => {
+  assert.equal(worker.normalizeBuildOptions({}, true).ksu_type, "bakasu");
+  assert.equal(worker.normalizeBuildOptions({ ksu_type: "resukisu" }, true).ksu_type, "bakasu");
 });
 
 test("concurrent kernel clicks reserve one active slot before dispatch", async t => {

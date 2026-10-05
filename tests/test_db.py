@@ -4,6 +4,7 @@ from kernel_build_bot.bot import (
     KernelBuildBot,
     SCRIPTS,
     apply_workflow_defaults,
+    build_options_with_preferences,
     defaults,
     is_kowsu_selection,
     normalize_workflow_key,
@@ -12,6 +13,7 @@ from kernel_build_bot.bot import (
     variant_markup,
     supports_self_config,
     WORKFLOWS,
+    KSU_VALUES,
 )
 
 
@@ -21,6 +23,13 @@ def test_kowsu_manager_delivery_selection():
     assert is_kowsu_selection("kowx")
     assert not is_kowsu_selection("resukisu")
     assert not is_kowsu_selection(None)
+
+
+def test_bakasu_selection_migrates_resukisu_preferences():
+    assert defaults()["ksu_type"] == "bakasu"
+    assert "bakasu" in KSU_VALUES
+    assert "resukisu" not in KSU_VALUES
+    assert build_options_with_preferences({"ksu_type": "resukisu"}, True)["ksu_type"] == "bakasu"
 
 
 def test_serial_owner_and_revoke(tmp_path):

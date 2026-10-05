@@ -123,10 +123,10 @@ BOOL_OPTION_ROWS = (
     ("rekernel_enable", "baseband_guard"),
     ("self_config",),
 )
-KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
+KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
 KSU_LABELS = {
-    "resukisu": "ReSukiSU",
-    "sukisu": "SukiSU Ultra（ReSukiSU 内核）",
+    "bakasu": "BakaSU",
+    "sukisu": "SukiSU Ultra（BakaSU 内核）",
     "ksunext": "KernelSU Next",
     "kowsu": "KowSU",
     # Keep stale in-memory sessions from older deployments renderable.
@@ -167,7 +167,7 @@ def parse_whitelist(text: str) -> tuple[list[tuple[str, int | None]], list[str]]
 def defaults() -> dict[str, str]:
     values = {key: "false" for key in BOOL_LABELS}
     values.update(
-        ksu_type="resukisu",
+        ksu_type="bakasu",
         lz4_enable="true",
         unicode_enable="true",
         bbr_enable="false",
@@ -189,6 +189,8 @@ def build_options_with_preferences(saved: object, is_admin: bool) -> dict[str, s
     ksu_type = saved.get("ksu_type")
     if ksu_type == "kowx":
         ksu_type = "kowsu"
+    elif ksu_type == "resukisu":
+        ksu_type = "bakasu"
     if isinstance(ksu_type, str) and ksu_type in KSU_VALUES:
         options["ksu_type"] = ksu_type
     bbr = saved.get("bbr_enable")

@@ -131,10 +131,10 @@ const BOOL_OPTION_ROWS = [
   ["rekernel_enable", "baseband_guard"],
   ["self_config"],
 ] as const;
-const KSU_VALUES = ["resukisu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
+const KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
-  resukisu: "ReSukiSU",
-  sukisu: "SukiSU Ultra（ReSukiSU 内核）",
+  bakasu: "BakaSU",
+  sukisu: "SukiSU Ultra（BakaSU 内核）",
   ksunext: "KernelSU Next",
   kowsu: "KowSU",
   // Keep D1 sessions created before the selector rename usable.
@@ -157,7 +157,7 @@ function defaults(): Record<string, string> {
   const values: Record<string, string> = {};
   for (const key of Object.keys(BOOL_LABELS)) values[key] = "false";
   return Object.assign(values, {
-    ksu_type: "resukisu", lz4_enable: "true", unicode_enable: "true",
+    ksu_type: "bakasu", lz4_enable: "true", unicode_enable: "true",
     bbr_enable: "false", droidspaces_enable: "false",
     ccache_update: "false", ccache_debug: "false",
   });
@@ -170,7 +170,7 @@ function normalizeBuildOptions(saved: unknown, admin: boolean): Record<string, s
     if (key === "self_config" && !admin) continue;
     if (values[key] === "true" || values[key] === "false") options[key] = values[key];
   }
-  const ksuType = values.ksu_type === "kowx" ? "kowsu" : values.ksu_type;
+  const ksuType = values.ksu_type === "kowx" ? "kowsu" : values.ksu_type === "resukisu" ? "bakasu" : values.ksu_type;
   if (typeof ksuType === "string" && KSU_VALUES.includes(ksuType)) options.ksu_type = ksuType;
   if (typeof values.bbr_enable === "string" && BBR_VALUES.includes(values.bbr_enable)) options.bbr_enable = values.bbr_enable;
   if (typeof values.droidspaces_enable === "string" && DROID_VALUES.includes(values.droidspaces_enable)) options.droidspaces_enable = values.droidspaces_enable;
@@ -351,6 +351,7 @@ async function getSession(env: Env, userId: number): Promise<Session> {
   try {
     const session: Session = JSON.parse(row.data);
     if (session.options?.ksu_type === "kowx") session.options.ksu_type = "kowsu";
+    if (session.options?.ksu_type === "resukisu") session.options.ksu_type = "bakasu";
     return session;
   } catch { return {}; }
 }
