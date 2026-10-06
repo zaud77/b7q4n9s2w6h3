@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 import ts from "typescript";
 import { zipSync, strToU8 } from "fflate";
 
@@ -107,7 +108,7 @@ function assertPrivateMessages(state) {
 }
 
 async function deliveryFixture(t, options = {}) {
-  const { filename, digestOnly, packageOverride, conclusion = "success", ...overrides } = options;
+  const { filename, digestOnly, packageOverride, kernelArtifactBytes, conclusion = "success", ...overrides } = options;
   const { env, state } = await fixture(t, overrides);
   const inputs = await worker.nomountInputs(serial, requestId);
   if (digestOnly) delete inputs.device_serial;
@@ -120,8 +121,12 @@ async function deliveryFixture(t, options = {}) {
   state.jobs.push(job);
   state.githubResponse = async url => {
     if (url.endsWith("/runs/99")) return Response.json({ status: "completed", conclusion });
-    if (url.endsWith("/artifacts")) return Response.json({ artifacts: [{ name: "nomount-suite-lkm", archive_download_url: "https://api.github.com/download/fixture" }] });
+    if (url.endsWith("/artifacts")) return Response.json({ artifacts: [
+      { name: "nomount-suite-lkm", archive_download_url: "https://api.github.com/download/fixture" },
+      ...(kernelArtifactBytes ? [{ name: "nomount-android16-6.12-kernel", archive_download_url: "https://api.github.com/download/kernel-fixture" }] : []),
+    ] });
     if (url.endsWith("/download/fixture")) return new Response(outer);
+    if (url.endsWith("/download/kernel-fixture")) return new Response(kernelArtifactBytes);
     throw new Error("Unexpected fixture request");
   };
   return { env, state, job, payload, outer, name };
@@ -227,6 +232,33 @@ test("embedded module properties replace binding.conf without weakening delivery
   }
   assert.throws(() => worker.validateNoMountPackage(embeddedPackageBytes(digest, valid, {"lkm/binding.conf":strToU8(`smoke_only=0\nserial_sha256=${digest}\n`)}), digest));
   assert.throws(() => worker.validateNoMountPackage(embeddedPackageBytes(digest, valid, {"second.ko":strToU8("extra")}), digest));
+});
+
+test("current runtime-bound package is verified against its exact run kernel artifact", async t => {
+  const inputs = await worker.nomountInputs(serial, requestId);
+  const kernelModule = strToU8("fixture-ko");
+  const binding = "a".repeat(64);
+  const buildInfo = { device_serial: serial, serial_sha256: inputs.device_serial_sha256, binding, smoke_only: 0, stage: "off", auth_version: 2 };
+  const checksum = createHash("sha256").update(kernelModule).digest("hex");
+  const kernelArtifactBytes = zipSync({
+    "nomount.ko": kernelModule,
+    "build-info.json": strToU8(JSON.stringify(buildInfo)),
+    "sha256.txt": strToU8(`${checksum}  artifacts/nomount.ko\n`),
+  });
+  const packageOverride = zipSync({
+    "lkm/nomount.ko": kernelModule,
+    "runtime.sh": strToU8(`NM_PACKAGE_BINDING='${binding}'\nNM_PACKAGE_SMOKE_ONLY='0'\nNM_PACKAGE_DIAGNOSTIC='0'\nNM_PACKAGE_STAGE='full'\n${" ".repeat(20000)}`),
+    "classes.dex": strToU8("fixture-dex"),
+    "zygisk/arm64-v8a.so": strToU8("fixture-bridge"),
+    "module.prop": strToU8("version=1.80\n"),
+  });
+  const { env, state, job, payload } = await deliveryFixture(t, { packageOverride, kernelArtifactBytes });
+  await worker.processJob(env, job);
+  const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
+  assert.deepEqual(new Uint8Array(await sent.body.get("document").arrayBuffer()), payload);
+  assert.equal(job.status, "sent");
+  assert.equal(job.active_user_id, null);
+  assert.ok(state.calls.some(call => call.url.endsWith("/download/kernel-fixture")));
 });
 
 test("embedded package metadata is delivered without a separate binding file", async t => {

@@ -1309,6 +1309,26 @@ async function downloadLatestKowSuManager(env: Env): Promise<{ name: string; byt
   return { name: String(asset.name), bytes };
 }
 
+async function downloadNoMountBuildAttestation(url: string, headers: Record<string, string>) {
+  const response = await fetch(url, { headers, redirect: "follow" });
+  if (!response.ok) throw new Error(`NoMount binding artifact download ${response.status}`);
+  const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+  const kernelModule = files["nomount.ko"];
+  const buildInfoBytes = files["build-info.json"];
+  const checksumsBytes = files["sha256.txt"];
+  if (!kernelModule?.length || !buildInfoBytes?.length || !checksumsBytes?.length) {
+    throw new Error("NoMount binding artifact is incomplete");
+  }
+  let buildInfo: any;
+  try { buildInfo = JSON.parse(strFromU8(buildInfoBytes)); }
+  catch { throw new Error("NoMount build metadata is invalid"); }
+  const checksum = strFromU8(checksumsBytes).match(/^([a-f0-9]{64})  artifacts\/nomount\.ko$/m)?.[1];
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(kernelModule).buffer as ArrayBuffer));
+  const actual = Array.from(digest).map(value => value.toString(16).padStart(2, "0")).join("");
+  if (!checksum || checksum !== actual) throw new Error("NoMount binding artifact checksum mismatch");
+  return { buildInfo, kernelModule };
+}
+
 async function processJob(env: Env, job: any) {
   let inputs: any = {}; try { inputs = JSON.parse(job.inputs || "{}"); } catch {}
   const lkm = inputs.build_kind === "nomount-lkm" && job.workflow_file === "lkm.yml";
@@ -1354,7 +1374,11 @@ async function processJob(env: Env, job: any) {
     if (!download.ok) throw new Error(`NoMount artifact download ${download.status}`);
     const module = unwrapArtifact(new Uint8Array(await download.arrayBuffer()), NOMOUNT_PACKAGE_RE);
     if (!module) throw new Error("Expected one installable NoMount module ZIP");
-    validateNoMountPackage(module.bytes, inputs.device_serial_sha256);
+    const bindingArtifact = artifacts.find(a => a.name === "nomount-android16-6.12-kernel" && !a.expired);
+    const attestation = bindingArtifact
+      ? await downloadNoMountBuildAttestation(bindingArtifact.archive_download_url, headers)
+      : null;
+    validateNoMountPackage(module.bytes, inputs.device_serial_sha256, attestation);
     const serial = String(inputs.device_serial || await serialForUser(env, Number(job.telegram_user_id)) || "");
     const serialMatches = SERIAL_RE.test(serial) && (await nomountInputs(serial, job.request_id)).device_serial_sha256 === inputs.device_serial_sha256;
     const filename = serialMatches
@@ -1388,16 +1412,43 @@ async function processJob(env: Env, job: any) {
   }
   await finishJob(env, job.request_id, "sent", runId);
 }
-function validateNoMountPackage(bytes: Uint8Array, serialDigest: string) {
+function parseRuntimeBinding(text: string): Map<string, string> {
+  const values = new Map<string, string>();
+  const lines = text.split(/\r?\n/).filter(line => line.startsWith("NM_PACKAGE_"));
+  for (const line of lines) {
+    const match = line.match(/^NM_PACKAGE_(BINDING|SMOKE_ONLY|DIAGNOSTIC|STAGE)='([^'\r\n]*)'$/);
+    if (!match) throw new Error("Invalid runtime package binding");
+    const key = match[1].toLowerCase();
+    if (values.has(key)) throw new Error("Duplicate runtime package binding");
+    values.set(key, match[2]);
+  }
+  if (values.size !== 4 || !/^[a-f0-9]{64}$/.test(values.get("binding") || "") ||
+    !["0", "1"].includes(values.get("smoke_only") || "") ||
+    !["0", "1"].includes(values.get("diagnostic") || "") ||
+    !["core", "hooks", "vfs", "kernel", "full"].includes(values.get("stage") || "")) {
+    throw new Error("Invalid runtime package binding");
+  }
+  return values;
+}
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false;
+  return true;
+}
+function validateNoMountPackage(bytes: Uint8Array, serialDigest: string, attestation?: any) {
   if (!/^[a-f0-9]{64}$/.test(serialDigest || "")) throw new Error("Missing expected device binding");
   const entries = new Map<string, number>();
   const files = unzipSync(bytes, { filter(file) {
     if (entries.has(file.name)) throw new Error("Duplicate package entry");
     entries.set(file.name, file.originalSize);
-    return ["module.prop", "lkm/binding.conf"].includes(file.name) && file.originalSize <= 4096;
+    return ["module.prop", "lkm/binding.conf"].includes(file.name) && file.originalSize <= 4096 ||
+      file.name === "runtime.sh" && file.originalSize <= 65536 ||
+      file.name === "lkm/nomount.ko" && file.originalSize <= 67108864;
   } });
   const properties = files["module.prop"] ? strFromU8(files["module.prop"]) : "";
   const embedded = properties.split(/\r?\n/).filter(line => line.startsWith("nomount_"));
+  const runtimeMetadata = !embedded.length && !files["lkm/binding.conf"] && files["runtime.sh"]
+    ? parseRuntimeBinding(strFromU8(files["runtime.sh"])) : null;
   const binding = embedded.length ? embedded.map(line => line.slice("nomount_".length)).join("\n")
     : files["lkm/binding.conf"] ? strFromU8(files["lkm/binding.conf"]) : "";
   if (embedded.length && entries.has("lkm/binding.conf")) throw new Error("Conflicting package metadata");
@@ -1407,8 +1458,20 @@ function validateNoMountPackage(bytes: Uint8Array, serialDigest: string) {
     if (!match || values.has(match[1])) throw new Error("Invalid or duplicate package metadata");
     values.set(match[1], match[2]);
   }
-  if (values.get("smoke_only") !== "0" || values.get("serial_sha256") !== serialDigest) throw new Error("Wrong device or smoke package");
-  if (values.get("diagnostic") === "1") throw new Error("Diagnostic package cannot be delivered as a normal build");
+  if (runtimeMetadata) {
+    const info = attestation?.buildInfo;
+    if (!info) throw new Error("Missing NoMount build attestation");
+    if (!/^[a-f0-9]{64}$/.test(info.binding || "") || info.binding !== runtimeMetadata.get("binding") ||
+      info.serial_sha256 !== serialDigest || info.smoke_only !== 0 || info.stage !== "off" || info.auth_version !== 2)
+      throw new Error("NoMount build attestation does not match requested device");
+    if (runtimeMetadata.get("smoke_only") !== "0" || runtimeMetadata.get("diagnostic") !== "0" || runtimeMetadata.get("stage") !== "full")
+      throw new Error("Smoke or diagnostic NoMount package cannot be delivered");
+    if (!attestation.kernelModule || !equalBytes(files["lkm/nomount.ko"] || new Uint8Array(), attestation.kernelModule))
+      throw new Error("Packaged NoMount module differs from its verified kernel artifact");
+  } else {
+    if (values.get("smoke_only") !== "0" || values.get("serial_sha256") !== serialDigest) throw new Error("Wrong device or smoke package");
+    if (values.get("diagnostic") === "1") throw new Error("Diagnostic package cannot be delivered as a normal build");
+  }
   if (embedded.length && (values.size !== 6 || !/^[a-f0-9]{64}$/.test(values.get("binding") || "") ||
     values.get("kmi") !== "android16-6.12" || values.get("diagnostic") !== "0" || values.get("stage") !== "full"))
     throw new Error("Invalid embedded package metadata");
