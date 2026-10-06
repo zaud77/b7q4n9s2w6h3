@@ -146,7 +146,7 @@ const BBR_VALUES = ["false", "true", "default"];
 const DROID_VALUES = ["false", "standard", "extend"];
 const KOWSU_LATEST_RELEASE_API = "https://api.github.com/repos/zaominn/KowSU/releases/latest";
 const KOWSU_MANAGER_ASSET = /^KowSU-Manager-.*\.apk$/i;
-const NOMOUNT_PACKAGE_RE = /^NoMount-Suite-v([0-9]+(?:\.[0-9]+)*)-LKM(?:-[A-Za-z0-9._-]+)?\.zip$/i;
+const NOMOUNT_PACKAGE_RE = /^(?!.*-SMOKE-NOT-FOR-INSTALL\.zip$)NoMount-Suite-v([0-9]+(?:\.[0-9]+)*)-LKM(?:-[A-Za-z0-9._-]+)?\.zip$/i;
 
 function now(): number { return Math.floor(Date.now() / 1000); }
 function admins(env: Env): Set<number> {

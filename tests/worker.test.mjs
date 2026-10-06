@@ -285,6 +285,10 @@ test("artifact matching accepts legacy and serial names but refuses ambiguous wr
   assert.equal(worker.unwrapArtifact(zipSync({ "unrelated.zip": payload }), worker.NOMOUNT_PACKAGE_RE), null);
   const ambiguous = zipSync({ "NoMount-Suite-v1.80-LKM-DEVICE_A.zip": payload, "NoMount-Suite-v1.80-LKM-DEVICE_B.zip": payload });
   assert.equal(worker.unwrapArtifact(ambiguous, worker.NOMOUNT_PACKAGE_RE), null);
+  const installableName = "NoMount-Suite-v1.80-LKM-DEVICE_A.zip";
+  const smokeName = "NoMount-Suite-v1.80-LKM-DEVICE_A-SMOKE-NOT-FOR-INSTALL.zip";
+  const withSmoke = zipSync({ [installableName]: payload, [smokeName]: payload });
+  assert.deepEqual(worker.unwrapArtifact(withSmoke, worker.NOMOUNT_PACKAGE_RE), { name: installableName, bytes: payload });
 });
 
 test("wrong-device packages are not sent even when their filenames match", async t => {
