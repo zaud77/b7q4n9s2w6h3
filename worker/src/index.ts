@@ -713,8 +713,9 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   ).bind(...params).run();
   return Number(result.meta?.changes || 0) > 0;
 }
-function workflowMarkup() {
+function workflowMarkup(includeOwnerNoMount = false) {
   const rows = Object.entries(SCRIPTS).map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
+  if (includeOwnerNoMount) rows.push([{ text: "独立 NoMount 模块（LKM）", callback_data: "owner_nomount" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
 }
@@ -850,11 +851,14 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
   }
   if (command === "buildfor") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
+    if (message.chat.type !== "private" || Number(chatId) !== Number(userId)) {
+      await sendMessage(env, chatId, "请私聊机器人使用 /buildfor，以保护目标序列号和构建产物。"); return;
+    }
     const serial = args[0] || "";
     if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/buildfor 序列号"); return; }
     if (!(await serialRecord(env, serial))) { await sendMessage(env, chatId, "该序列号不在启用的白名单中。"); return; }
     await setSession(env, userId, { serial, options: await loadBuildPreferences(env, userId, true), ownerDirectedBuild: true, deliveryChatId: userId });
-    await sendMessage(env, chatId, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择构建脚本：`, workflowMarkup()); return;
+    await sendMessage(env, chatId, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择内核脚本，或构建独立 NoMount 模块：`, workflowMarkup(true)); return;
   }
   if (command === "allow") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
@@ -1019,6 +1023,31 @@ async function nomountInputs(serial: string, requestId: string): Promise<Record<
   return { device_serial: serial, device_serial_sha256: Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, "0")).join(""), build_request_id: requestId };
 }
 
+async function beginOwnerNoMountBuild(env: Env, query: any, session: Session) {
+  const userId = Number(query.from.id), chatId = Number(query.message.chat.id), messageId = query.message.message_id;
+  const reject = (text: string) => editMessage(env, chatId, messageId, text);
+  if (!isAdmin(env, userId) || query.message.chat.type !== "private" || chatId !== userId ||
+      !session.ownerDirectedBuild || Number(session.deliveryChatId) !== userId) {
+    await reject("无权使用指定白名单 NoMount 构建。"); return;
+  }
+  const serial = session.serial || "";
+  if (!SERIAL_RE.test(serial) || !(await serialRecord(env, serial))) {
+    await clearSession(env, userId); await reject("目标序列号授权复核失败，未触发构建。"); return;
+  }
+  if (!(await isMember(env, userId))) {
+    await clearSession(env, userId); await reject("管理员频道成员身份复核失败，未触发构建。"); return;
+  }
+  if (!env.LKM_GITHUB_TOKEN || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.LKM_GITHUB_REPO || "")) {
+    await reject("NoMount 构建服务暂不可用，请稍后重试。"); return;
+  }
+  if (await activeBuild(env, userId)) { await reject("已有构建正在进行，请等待完成。"); return; }
+  const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+  await setSession(env, userId, { ...session, nomountRequestId: requestId });
+  await editMessage(env, chatId, messageId, "为指定白名单序列号构建独立 NoMount LKM？", {
+    inline_keyboard: [[{ text: "开始构建", callback_data: `nomount:${requestId}` }], [{ text: "取消", callback_data: "cancel" }]],
+  });
+}
+
 async function dispatchNoMountBuild(env: Env, query: any, session: Session, requestId: string) {
   const userId = Number(query.from.id), chatId = Number(query.message.chat.id), messageId = query.message.message_id;
   const reject = (text: string) => editMessage(env, chatId, messageId, text);
@@ -1027,8 +1056,13 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
     await reject("构建确认已失效，请重新使用 /nomount。"); return;
   }
   if (await activeBuild(env, userId)) { await reject("已有构建正在进行，请等待完成。"); return; }
-  const serial = await serialForUser(env, userId);
-  if (!serial || serial !== session.serial || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
+  const ownerDirected = session.ownerDirectedBuild === true;
+  if (ownerDirected && (!isAdmin(env, userId) || Number(session.deliveryChatId) !== userId)) {
+    await clearSession(env, userId); await reject("指定白名单构建授权复核失败，未触发构建。"); return;
+  }
+  const serial = ownerDirected ? session.serial || "" : await serialForUser(env, userId);
+  if (!serial || (!ownerDirected && serial !== session.serial) || !SERIAL_RE.test(serial) ||
+      !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await reject("序列号或成员授权复核失败，未触发构建。"); return;
   }
   if (!env.LKM_GITHUB_TOKEN || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.LKM_GITHUB_REPO || "")) {
@@ -1043,7 +1077,7 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
     await env.DB.prepare(
       "INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) " +
       "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
-    ).bind(requestId, userId, userId, userId, "lkm.yml", JSON.stringify(stored), created, created).run();
+    ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), "lkm.yml", JSON.stringify(stored), created, created).run();
   } catch {
     await reject("这次构建已登记或已有构建正在进行，请勿重复提交。"); return;
   }
@@ -1072,6 +1106,9 @@ async function handleCallback(env: Env, update: any) {
   const data = query.data || "";
   if (data.startsWith("nomount:")) {
     await dispatchNoMountBuild(env, query, await getSession(env, userId), data.slice(8)); return;
+  }
+  if (data === "owner_nomount") {
+    await beginOwnerNoMountBuild(env, query, await getSession(env, userId)); return;
   }
   if (data.startsWith("set:")) {
     const [, key] = data.split(":", 3);
@@ -1110,7 +1147,10 @@ async function handleCallback(env: Env, update: any) {
       }
     }
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, "请选择本次构建脚本：", workflowMarkup());
+    const ownerBuild = session.ownerDirectedBuild === true && isAdmin(env, userId) && Number(chatId) === Number(userId);
+    await editMessage(env, chatId, messageId,
+      ownerBuild ? "请选择内核脚本，或构建独立 NoMount 模块：" : "请选择本次构建脚本：",
+      workflowMarkup(ownerBuild));
     return;
   }
   if (data === "back:variant") {

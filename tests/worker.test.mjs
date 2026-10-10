@@ -10,7 +10,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions };";
+  + "\nexport { handleCommand, handleCallback, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -145,6 +145,51 @@ test("bound users get a private, serial-free confirmation", async t => {
   assert.equal(prompt.includes("\n"), false);
   assert.equal(prompt.includes(serial), false);
   assertPrivateMessages(state);
+});
+
+test("buildfor offers owner-directed NoMount LKM and binds it to the selected whitelist serial", async t => {
+  const { env, state } = await fixture(t, { bound: null });
+  const ownerQuery = { from: { id: 1 }, message: { chat: { id: 1, type: "private" }, message_id: 7 } };
+  await worker.handleCommand(env, { message: { ...ownerQuery.message, from: ownerQuery.from } }, "buildfor", [serial]);
+  const menu = state.calls.find(call => call.body?.text?.includes("请选择内核脚本"));
+  assert.ok(menu);
+  assert.ok(menu.body.reply_markup.inline_keyboard.flat().some(button => button.callback_data === "owner_nomount"));
+  assert.equal(JSON.parse(state.sessions.get(1)).serial, serial);
+
+  await worker.handleCallback(env, { callback_query: { id: "cb-1", from: ownerQuery.from, message: ownerQuery.message, data: "owner_nomount" } });
+  const saved = JSON.parse(state.sessions.get(1));
+  assert.equal(saved.serial, serial);
+  assert.equal(saved.ownerDirectedBuild, true);
+  assert.equal(saved.deliveryChatId, 1);
+  assert.match(saved.nomountRequestId, /^[a-f0-9]{16}$/);
+  const confirmation = state.calls.find(call => call.body?.text === "为指定白名单序列号构建独立 NoMount LKM？");
+  assert.ok(confirmation.body.reply_markup.inline_keyboard.flat().some(button => button.callback_data === `nomount:${saved.nomountRequestId}`));
+
+  await worker.dispatchNoMountBuild(env, { ...ownerQuery, message: { ...ownerQuery.message, message_id: 8 } }, saved, saved.nomountRequestId);
+  const [dispatch] = dispatches(state);
+  assert.equal(dispatch.url, "https://api.github.com/repos/zaud77/m8v3p6r9x2k4/actions/workflows/lkm.yml/dispatches");
+  assert.equal(dispatch.body.inputs.device_serial, serial);
+  assert.equal(JSON.parse(state.jobs[0].inputs).build_kind, "nomount-lkm");
+  assert.equal(state.jobs[0].chat_id, 1);
+  assert.equal(state.calls.at(-1).body.text, "已提交，完成后自动发包。");
+});
+
+test("owner-directed NoMount still rejects non-admins and serials outside the whitelist", async t => {
+  const { env, state } = await fixture(t, { bound: null });
+  const request = { ...session(), ownerDirectedBuild: true, deliveryChatId: 42 };
+  await worker.dispatchNoMountBuild(env, query, request, requestId);
+  await worker.dispatchNoMountBuild(env, { ...query, from: { id: 1 }, message: { ...query.message, chat: { id: 1, type: "private" } } },
+    { ...request, serial: "OTHER_DEVICE_456", deliveryChatId: 1 }, requestId);
+  assert.equal(dispatches(state).length, 0);
+  assert.equal(state.jobs.length, 0);
+});
+
+test("regular users do not see the owner-directed NoMount option", async t => {
+  const { env, state } = await fixture(t);
+  await worker.handleCommand(env, { message: { from: { id: 42 }, chat: { id: 42, type: "private" } } }, "build", []);
+  const menu = state.calls.find(call => call.body?.text?.includes("请选择风驰版本"));
+  assert.ok(menu);
+  assert.equal(menu.body.reply_markup.inline_keyboard.flat().some(button => button.callback_data === "owner_nomount"), false);
 });
 
 for (const [name, overrides] of [["unbound user", { bound: null }], ["revoked serial", { enabled: false }], ["non-member", { member: false }]]) {
