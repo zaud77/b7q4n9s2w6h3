@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import ts from "typescript";
 import { zipSync, strToU8 } from "fflate";
 
@@ -79,6 +80,39 @@ async function fixture(t, overrides = {}) {
   };
   t.after(() => { globalThis.fetch = previous; });
   return { env, state };
+}
+
+async function quotaFixture(t) {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-15T04:00:00Z"));
+  const { env, state } = await fixture(t);
+  const database = new DatabaseSync(":memory:");
+  t.after(() => database.close());
+  database.exec(await readFile(new URL("../worker/schema.sql", import.meta.url), "utf8"));
+  env.DB = { prepare(sql) {
+    const statement = database.prepare(sql);
+    let values = [];
+    return {
+      bind(...args) { values = args; return this; },
+      async first() { return statement.get(...values) || null; },
+      async run() { return { meta: { changes: statement.run(...values).changes } }; },
+    };
+  } };
+  const timestamp = Math.floor(Date.now() / 1000);
+  database.prepare("INSERT INTO serial_bindings(serial_hash,serial_value,owner_user_id,created_at,created_by) VALUES(?,?,?,?,?)")
+    .run(await worker.digestSerial(env, serial), serial, 42, timestamp, 1);
+  database.prepare("INSERT INTO workflow_bindings(telegram_user_id,workflow_key,bound_at) VALUES(?,?,?)").run(42, "623", timestamp);
+  let nextId = 0;
+  function addJob({ userId = 42, status = "failed", runId = 99, succeededAt = null, createdAt = timestamp - 1200, kind = "kernel" } = {}) {
+    const id = `quota-job-${++nextId}`;
+    database.prepare("INSERT INTO build_jobs(request_id,telegram_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .run(id, userId, userId, kind === "kernel" ? "kernel.yml" : "lkm.yml", JSON.stringify({ build_kind: kind }),
+        runId, status, succeededAt, createdAt, createdAt);
+  }
+  function countFailures(userId = 42, enabled = true) {
+    database.prepare("INSERT INTO bot_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(`quota_count_failures:${userId}`, enabled ? "1" : "0");
+  }
+  return { env, state, database, timestamp, addJob, countFailures };
 }
 
 function dispatches(state) { return state.calls.filter(call => call.url.endsWith("/dispatches")); }
@@ -492,6 +526,103 @@ test("quota rolls at Beijing midnight, not UTC midnight", () => {
   const after = before + 1;
   assert.deepEqual(worker.beijingDayBounds(before), [Date.parse("2026-09-30T16:00:00Z") / 1000, after]);
   assert.deepEqual(worker.beijingDayBounds(after), [after, after + 86400]);
+});
+
+test("without a per-user policy failures remain free", async t => {
+  const { env, timestamp, addJob } = await quotaFixture(t);
+  addJob();
+  addJob();
+  addJob({ status: "sent", succeededAt: timestamp - 1200 });
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+});
+
+test("enabling the policy counts existing failures without rewriting build history", async t => {
+  const { env, database, addJob, countFailures } = await quotaFixture(t);
+  addJob();
+  addJob();
+  const before = database.prepare("SELECT * FROM build_jobs ORDER BY request_id").all();
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+  countFailures();
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
+  assert.deepEqual(database.prepare("SELECT * FROM build_jobs ORDER BY request_id").all(), before);
+});
+
+test("failure policy counts one success plus one failed run and only affects its user", async t => {
+  const { env, timestamp, addJob, countFailures } = await quotaFixture(t);
+  countFailures();
+  for (const userId of [42, 43]) {
+    addJob({ userId, status: "sent", succeededAt: timestamp - 1200 });
+    addJob({ userId });
+  }
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
+  assert.equal(await worker.buildQuotaMessage(env, 43), null);
+  countFailures(42, false);
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+});
+
+for (const kind of ["kernel", "lkm"]) {
+  test(`two failed runs block another ${kind} build for the selected user`, async t => {
+    const { env, state, addJob, countFailures } = await quotaFixture(t);
+    countFailures();
+    addJob({ kind: "kernel" });
+    addJob({ kind: "nomount-lkm" });
+    if (kind === "kernel") await worker.dispatchBuild(env, query, kernelSession());
+    else await worker.dispatchNoMountBuild(env, query, session(), requestId);
+    assert.equal(dispatches(state).length, 0);
+    assert.match(state.calls.at(-1).body.text, /2 次构建上限/);
+    assertPrivateMessages(state);
+  });
+}
+
+test("failure policy excludes rejected requests, unfinished runs and moved jobs", async t => {
+  const { env, timestamp, addJob, countFailures } = await quotaFixture(t);
+  countFailures();
+  addJob({ runId: null });
+  addJob({ runId: null });
+  addJob({ status: "running" });
+  addJob({ status: "submitted", runId: null });
+  addJob({ status: "repository_moved" });
+  addJob({ status: "sent", succeededAt: timestamp - 1200 });
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+  addJob();
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
+});
+
+test("failed runs do not introduce a new cooldown or count a successful job twice", async t => {
+  const { env, timestamp, addJob, countFailures } = await quotaFixture(t);
+  countFailures();
+  addJob({ status: "failed", succeededAt: timestamp - 1200 });
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+  addJob({ createdAt: timestamp });
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
+});
+
+test("failure policy preserves quota resets and Beijing date boundaries", async t => {
+  const { env, database, timestamp, addJob, countFailures } = await quotaFixture(t);
+  countFailures();
+  const [start, end] = worker.beijingDayBounds(timestamp);
+  addJob({ createdAt: start - 1 });
+  addJob({ createdAt: end });
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+  addJob({ createdAt: timestamp - 5 });
+  addJob({ createdAt: timestamp - 4 });
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
+  database.prepare("INSERT INTO quota_resets(telegram_user_id,reset_at) VALUES(?,?)").run(42, timestamp - 4);
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+  addJob({ createdAt: timestamp - 3 });
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
+  addJob({ createdAt: timestamp - 2 });
+  assert.match(await worker.buildQuotaMessage(env, 42), /2 次构建上限/);
+  assert.equal(database.prepare("SELECT COUNT(*) AS total FROM build_jobs").get().total, 6);
+});
+
+test("admins remain exempt even with a failure policy", async t => {
+  const { env, addJob, countFailures } = await quotaFixture(t);
+  countFailures();
+  addJob();
+  addJob();
+  env.ADMIN_USER_IDS = "42";
+  assert.equal(await worker.buildQuotaMessage(env, 42), null);
 });
 
 test("rejected kernel dispatch does not charge the quota or block a retry", async t => {

@@ -1011,8 +1011,10 @@ async function buildQuotaMessage(env: Env, userId: number): Promise<string | nul
   const wait = latest?.latest ? Math.max(0, Number(env.BUILD_COOLDOWN_SECONDS || 600) - (submittedAt - Number(latest.latest))) : 0;
   if (wait) return `请在 ${wait} 秒后再构建。`;
   const count: any = await env.DB.prepare(
-    "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND succeeded_at IS NOT NULL AND created_at>=? AND created_at<?"
-  ).bind(userId, quotaStart, dayEnd).first();
+    "SELECT COUNT(*) AS total FROM build_jobs WHERE telegram_user_id=? AND created_at>=? AND created_at<? " +
+    "AND (succeeded_at IS NOT NULL OR (status='failed' AND github_run_id IS NOT NULL AND " +
+    "EXISTS (SELECT 1 FROM bot_state WHERE key=? AND value='1')))"
+  ).bind(userId, quotaStart, dayEnd, `quota_count_failures:${userId}`).first();
   const limit = Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2));
   return Number(count?.total || 0) >= limit ? `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。` : null;
 }
