@@ -33,6 +33,7 @@ from .db import Database
 SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{6,64}$")
 
 SCRIPTS = {
+    "669aosp": ("6.12.69·AOSP", {"gki": ("通用 GKI", "669aosp")}),
     "623": (
         "6.12.23 · OnePlus 15",
         {
@@ -75,6 +76,7 @@ SCRIPTS = {
     ),
 }
 WORKFLOWS = {
+    "669aosp": ("6.12.69·AOSP", "build_aosp_6.12.69_gki.yml"),
     "623g": ("6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
     "623p": ("6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
     "638tg": ("6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"),
@@ -93,6 +95,8 @@ WORKFLOW_SCRIPTS = {
 }
 ONEPLUS_15_WORKFLOW_KEYS = {"623g", "623p"}
 ONEPLUS_15T_WORKFLOW_KEYS = {"638tg", "638tp"}
+AOSP_WORKFLOW_KEY = "669aosp"
+AOSP_BOOL_OPTIONS = {"zram_writeback_enable", "qpace_enable"}
 LEGACY_WORKFLOW_KEYS = {
     **WORKFLOW_SCRIPTS,
     # Normalize persisted workflow choices back to their device binding keys.
@@ -103,6 +107,8 @@ LEGACY_WORKFLOW_KEYS = {
 
 
 BOOL_LABELS = {
+    "zram_writeback_enable": "独立回写（实验）",
+    "qpace_enable": "QPaCE（实验）",
     "self_config": "自用配置",
     "susfs_enable": "SUSFS",
     "nomount_enable": "NoMount",
@@ -116,6 +122,7 @@ BOOL_LABELS = {
     "baseband_guard": "基带保护",
 }
 BOOL_OPTION_ROWS = (
+    ("zram_writeback_enable", "qpace_enable"),
     ("susfs_enable", "nomount_enable"),
     ("kpm_enable", "lz4_enable"),
     ("lz4kd_enable", "unicode_enable"),
@@ -220,8 +227,13 @@ def apply_workflow_defaults(workflow_key: str, options: dict[str, str]) -> dict[
     return options
 
 
+def variant_prompt(script_key: str, prefix: str = "已选择") -> str:
+    version = "构建" if script_key == AOSP_WORKFLOW_KEY else "风驰"
+    return f"{prefix}：{SCRIPTS[script_key][0]}\n请选择{version}版本："
+
+
 def supports_self_config(workflow_key: str) -> bool:
-    return workflow_key in ONEPLUS_15_WORKFLOW_KEYS
+    return workflow_key in ONEPLUS_15_WORKFLOW_KEYS or workflow_key == AOSP_WORKFLOW_KEY
 
 
 def normalize_workflow_key(workflow_key: str | None) -> str | None:
@@ -521,7 +533,7 @@ class KernelBuildBot:
                 context.user_data["workflow"] = bound_workflow
                 apply_workflow_defaults(bound_workflow, options)
             await update.effective_message.reply_text(
-                f"已绑定：{SCRIPTS[bound_workflow][0]}\n请选择风驰版本："
+                variant_prompt(bound_workflow, "已绑定")
                 if variants
                 else options_prompt(bound_workflow, "已绑定"),
                 reply_markup=(
@@ -530,6 +542,7 @@ class KernelBuildBot:
                     else self.options_markup(
                         options,
                         self.is_admin(user.id) and supports_self_config(bound_workflow),
+                        bound_workflow,
                     )
                 ),
             )
@@ -619,7 +632,7 @@ class KernelBuildBot:
             await update.effective_message.reply_text("序列号验证通过，已批准进入频道。加入后可使用 /build。")
             return
 
-    def options_markup(self, options: dict[str, str], show_self_config: bool) -> InlineKeyboardMarkup:
+    def options_markup(self, options: dict[str, str], show_self_config: bool, workflow_key: str = "") -> InlineKeyboardMarkup:
         rows = []
         for keys in BOOL_OPTION_ROWS:
             row = [
@@ -628,7 +641,8 @@ class KernelBuildBot:
                     callback_data=f"set:{key}:{'false' if options[key] == 'true' else 'true'}",
                 )
                 for key in keys
-                if key != "self_config" or show_self_config
+                if (key != "self_config" or show_self_config)
+                and (key not in AOSP_BOOL_OPTIONS or workflow_key == AOSP_WORKFLOW_KEY)
             ]
             if row:
                 rows.append(row)
@@ -679,7 +693,7 @@ class KernelBuildBot:
                 bound_script = normalize_workflow_key(self.db.workflow_for_user(query.from_user.id))
                 if bound_script in SCRIPTS:
                     await query.edit_message_text(
-                        f"已绑定：{SCRIPTS[bound_script][0]}\n请选择风驰版本：",
+                        variant_prompt(bound_script, "已绑定"),
                         reply_markup=variant_markup(bound_script, show_back=False),
                     )
                     return
@@ -692,7 +706,7 @@ class KernelBuildBot:
                 await query.edit_message_text("会话已失效，请重新使用 /build。")
                 return
             await query.edit_message_text(
-                f"已选择：{SCRIPTS[script_key][0]}\n请选择风驰版本：",
+                variant_prompt(script_key),
                 reply_markup=variant_markup(script_key, show_back=self.is_admin(query.from_user.id)),
             )
             return
@@ -714,7 +728,7 @@ class KernelBuildBot:
                 return
             bound_script = normalize_workflow_key(self.db.bind_workflow(query.from_user.id, script_key))
             await query.edit_message_text(
-                f"已绑定：{SCRIPTS[bound_script][0]}\n请选择风驰版本：",
+                variant_prompt(bound_script, "已绑定"),
                 reply_markup=variant_markup(bound_script, show_back=False, show_bind=False),
             )
             return
@@ -740,7 +754,7 @@ class KernelBuildBot:
             if variants:
                 context.user_data.pop("workflow", None)
                 await query.edit_message_text(
-                    f"已选择：{SCRIPTS[key][0]}\n请选择风驰版本：",
+                    variant_prompt(key),
                     reply_markup=variant_markup(
                         key,
                         show_back=self.is_admin(query.from_user.id) or not bound_script,
@@ -755,6 +769,7 @@ class KernelBuildBot:
                 reply_markup=self.options_markup(
                     context.user_data["options"],
                     self.is_admin(query.from_user.id) and supports_self_config(key),
+                    key,
                 ),
             )
             return
@@ -783,6 +798,7 @@ class KernelBuildBot:
                 reply_markup=self.options_markup(
                     context.user_data["options"],
                     self.is_admin(query.from_user.id) and supports_self_config(workflow_key),
+                    workflow_key,
                 ),
             )
             return
@@ -807,6 +823,8 @@ class KernelBuildBot:
             options["ksu_type"] = "kowsu"
         if data.startswith("set:"):
             _, key, new_value = data.split(":", 2)
+            if key in AOSP_BOOL_OPTIONS and workflow_key != AOSP_WORKFLOW_KEY:
+                return
             if key in BOOL_LABELS and new_value in {"false", "true"}:
                 if key == "self_config" and not self.is_admin(query.from_user.id):
                     await query.edit_message_text("该配置仅限所有者使用。")
@@ -826,6 +844,8 @@ class KernelBuildBot:
                 return
         elif data.startswith("toggle:"):
             key = data.split(":", 1)[1]
+            if key in AOSP_BOOL_OPTIONS and workflow_key != AOSP_WORKFLOW_KEY:
+                return
             if key not in BOOL_LABELS:
                 return
             if key == "self_config" and not self.is_admin(query.from_user.id):
@@ -851,6 +871,7 @@ class KernelBuildBot:
             reply_markup=self.options_markup(
                 options,
                 self.is_admin(query.from_user.id) and supports_self_config(workflow_key),
+                workflow_key,
             )
         )
 
@@ -905,6 +926,9 @@ class KernelBuildBot:
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
         inputs.pop("zarm_tool", None)
+        if workflow_key != AOSP_WORKFLOW_KEY:
+            for key in AOSP_BOOL_OPTIONS:
+                inputs.pop(key, None)
         if inputs.get("ksu_type") == "kowx":
             inputs["ksu_type"] = "kowsu"
         if not supports_self_config(workflow_key):

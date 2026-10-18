@@ -19,7 +19,7 @@ const serial = "TEST_DEVICE_123";
 const query = { from: { id: 42 }, message: { chat: { id: 42, type: "private" }, message_id: 7 } };
 
 async function fixture(t, overrides = {}) {
-  const state = { bound: serial, enabled: true, member: true, count: 0, latest: null, sessions: new Map(), jobs: [], calls: [], dispatchStatus: 204, ...overrides };
+  const state = { bound: serial, workflowBinding: "623", enabled: true, member: true, count: 0, latest: null, sessions: new Map(), jobs: [], calls: [], dispatchStatus: 204, ...overrides };
   const env = { ADMIN_USER_IDS: "1", SERIAL_PEPPER: "fixture-pepper", GITHUB_TOKEN: "old-kernel-fixture-token",
     KERNEL_GITHUB_TOKEN: "new-kernel-fixture-token", LKM_GITHUB_TOKEN: "new-lkm-fixture-token",
     GITHUB_REPO: "zaud77/k6r9m2p7v4x8", LKM_GITHUB_REPO: "zaud77/m8v3p6r9x2k4",
@@ -33,7 +33,7 @@ async function fixture(t, overrides = {}) {
       async first() {
         if (sql.includes("SELECT value FROM bot_state")) return { value: "done" };
         if (sql.includes("SELECT serial_value")) return state.bound ? { serial_value: state.bound } : null;
-        if (sql.includes("SELECT workflow_key")) return { workflow_key: "623" };
+        if (sql.includes("SELECT workflow_key")) return state.workflowBinding ? { workflow_key: state.workflowBinding } : null;
         if (sql.includes("SELECT 1 AS yes FROM build_jobs")) return state.jobs.some(job => job.active_user_id === values[0]) ? { yes: 1 } : null;
         if (sql.includes("SELECT data FROM sessions")) return state.sessions.has(values[0]) ? { data: state.sessions.get(values[0]), updated_at: Math.floor(Date.now() / 1000) } : null;
         if (sql.includes("SELECT MAX(created_at)")) return { latest: state.latest };
@@ -42,6 +42,7 @@ async function fixture(t, overrides = {}) {
       },
       async run() {
         if (sql.includes("INSERT INTO sessions")) state.sessions.set(values[0], values[1]);
+        if (sql.includes("INSERT INTO workflow_bindings")) state.workflowBinding ||= values[1];
         if (sql.includes("DELETE FROM sessions")) state.sessions.delete(values[0]);
         if (sql.includes("INSERT INTO build_jobs")) {
           if (state.jobs.some(job => job.active_user_id === values[2] || job.request_id === values[0])) throw new Error("unique job constraint");
@@ -449,6 +450,47 @@ test("kernel dispatch uses the migrated repository and credential", async t => {
   assert.equal(call.body.inputs.github_repo, undefined);
   assert.equal(JSON.parse(state.jobs[0].inputs).github_repo, env.GITHUB_REPO);
   assert.equal(state.jobs[0].chat_id, 42);
+});
+
+test("AOSP menu keeps its exact name and requires explicit script binding", async t => {
+  const { env, state } = await fixture(t, { workflowBinding: null });
+  await worker.handleCommand(env, { message: { from: query.from, chat: query.message.chat } }, "build", []);
+  const menu = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
+  assert.ok(menu.some(button => button.text === "6.12.69·AOSP" && button.callback_data === "kernel:669aosp"));
+  const click = data => worker.handleCallback(env, { callback_query: { ...query, id: "aosp-callback", data } });
+  await click("kernel:669aosp");
+  assert.match(state.calls.at(-1).body.text, /请选择构建版本/);
+  await click("variant:669aosp:gki");
+  assert.match(state.calls.at(-1).body.text, /请先点击/);
+  await click("bind:669aosp");
+  await click("variant:669aosp:gki");
+  const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
+  assert.deepEqual(buttons.slice(0, 2).map(button => button.callback_data), ["set:zram_writeback_enable:true", "set:qpace_enable:true"]);
+  assert.ok(!buttons.some(button => button.callback_data.startsWith("set:self_config:")));
+  assert.equal(state.workflowBinding, "669aosp");
+});
+
+test("AOSP dispatch forwards experiments and never inherits the owner-only workflow default", async t => {
+  const { env, state } = await fixture(t, { workflowBinding: "669aosp" });
+  await worker.dispatchBuild(env, query, { serial, workflow: "669aosp", options: {
+    ...worker.normalizeBuildOptions({}, true), self_config: "true", zram_writeback_enable: "true", qpace_enable: "true",
+  } });
+  const [call] = dispatches(state);
+  assert.ok(call.url.endsWith("/actions/workflows/build_aosp_6.12.69_gki.yml/dispatches"));
+  assert.equal(call.body.inputs.zram_writeback_enable, "true");
+  assert.equal(call.body.inputs.qpace_enable, "true");
+  assert.equal(call.body.inputs.self_config, "false");
+  assertPrivateMessages(state);
+});
+
+test("device-specific builds do not receive AOSP-only workflow inputs", async t => {
+  const { env, state } = await fixture(t);
+  const selected = kernelSession();
+  Object.assign(selected.options, { zram_writeback_enable: "true", qpace_enable: "true" });
+  await worker.dispatchBuild(env, query, selected);
+  const [call] = dispatches(state);
+  assert.equal(call.body.inputs.zram_writeback_enable, undefined);
+  assert.equal(call.body.inputs.qpace_enable, undefined);
 });
 
 test("BakaSU is the default kernel manager and old ReSukiSU preferences migrate", () => {

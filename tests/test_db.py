@@ -106,7 +106,10 @@ def test_data_migration_deletes_legacy_bindings_and_revoked_serials(tmp_path):
 
 
 def test_workflow_menu_and_oneplus15t_defaults():
-    assert list(SCRIPTS) == ["623", "638t", "623m", "638a", "658", "658m"]
+    assert list(SCRIPTS) == ["669aosp", "623", "638t", "623m", "638a", "658", "658m"]
+    assert SCRIPTS["669aosp"][0] == "6.12.69·AOSP"
+    assert WORKFLOWS["669aosp"][1] == "build_aosp_6.12.69_gki.yml"
+    assert supports_self_config("669aosp")
     assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标", "紫标"]
     assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标", "紫标"]
     assert [label for label, _ in SCRIPTS["623m"][1].values()] == ["金标", "紫标"]

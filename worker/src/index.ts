@@ -60,6 +60,9 @@ const ADMIN_COMMANDS = [
   { command: "joinlink", description: "获取入群验证链接" },
 ];
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
+  "669aosp": ["6.12.69·AOSP", {
+    gki: ["通用 GKI", "669aosp"],
+  }],
   "623": ["6.12.23 · OnePlus 15", {
     gold: ["金标", "623g"],
     purple: ["紫标", "623p"],
@@ -84,6 +87,7 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
   }],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
+  "669aosp": ["6.12.69·AOSP", "build_aosp_6.12.69_gki.yml"],
   "623g": ["6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
   "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
   "638tg": ["6.12.38 · OnePlus 15T · 金标", "fastbuild_6.12.38_oneplus_15t_hmbird_gold.yml"],
@@ -102,6 +106,8 @@ const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
 );
 const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
+const AOSP_WORKFLOW_KEY = "669aosp";
+const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable"]);
 const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
   ...WORKFLOW_SCRIPTS,
   // Normalize persisted workflow choices back to their device binding keys.
@@ -111,6 +117,8 @@ const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
 };
 
 const BOOL_LABELS: Record<string, string> = {
+  zram_writeback_enable: "独立回写（实验）",
+  qpace_enable: "QPaCE（实验）",
   self_config: "自用配置",
   susfs_enable: "SUSFS",
   nomount_enable: "NoMount",
@@ -124,6 +132,7 @@ const BOOL_LABELS: Record<string, string> = {
   baseband_guard: "基带保护",
 };
 const BOOL_OPTION_ROWS = [
+  ["zram_writeback_enable", "qpace_enable"],
   ["susfs_enable", "nomount_enable"],
   ["kpm_enable", "lz4_enable"],
   ["lz4kd_enable", "unicode_enable"],
@@ -215,8 +224,11 @@ function applyWorkflowDefaults(workflowKey: string, options: Record<string, stri
 function optionsPrompt(workflowKey: string, prefix = "已选择"): string {
   return `${prefix}：${WORKFLOWS[workflowKey][0]}\n勾选项为开启；SUSFS 与 NoMount 自动互斥。`;
 }
+function variantPrompt(scriptKey: string, prefix = "已选择"): string {
+  return `${prefix}：${SCRIPTS[scriptKey][0]}\n请选择${scriptKey === AOSP_WORKFLOW_KEY ? "构建" : "风驰"}版本：`;
+}
 function supportsSelfConfig(workflowKey: string): boolean {
-  return ONEPLUS_15_WORKFLOW_KEYS.has(workflowKey);
+  return ONEPLUS_15_WORKFLOW_KEYS.has(workflowKey) || workflowKey === AOSP_WORKFLOW_KEY;
 }
 function normalizeWorkflowKey(workflowKey: string | null | undefined): string | null {
   if (!workflowKey) return null;
@@ -620,11 +632,12 @@ async function resetSerialQuota(env: Env, serial: string): Promise<number | null
   return ownerUserId;
 }
 
-function optionsMarkup(options: Record<string, string>, showSelf: boolean) {
+function optionsMarkup(options: Record<string, string>, showSelf: boolean, workflowKey = "") {
   const rows: any[] = [];
   for (const keys of BOOL_OPTION_ROWS) {
     const row = keys
       .filter(key => key !== "self_config" || showSelf)
+      .filter(key => !AOSP_BOOL_OPTIONS.has(key) || workflowKey === AOSP_WORKFLOW_KEY)
       .map(key => ({
         text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
         callback_data: `set:${key}:${options[key] === "true" ? "false" : "true"}`,
@@ -707,9 +720,10 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   const jsonArgs = fields.map(() => "?, ?").join(", ");
   const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.${name}`, next]);
   params.push(now(), userId);
-  const selfConfigGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p')" : "";
+  const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp')"
+    : AOSP_BOOL_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow')='669aosp'" : "";
   const result: any = await env.DB.prepare(
-    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${selfConfigGuard}`
+    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${workflowGuard}`
   ).bind(...params).run();
   return Number(result.meta?.changes || 0) > 0;
 }
@@ -841,8 +855,8 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
         applyWorkflowDefaults(bound, options);
       }
       await setSession(env, userId, session);
-      if (variants) await sendMessage(env, chatId, `已绑定：${SCRIPTS[bound][0]}\n请选择风驰版本：`, variantMarkup(bound, isAdmin(env, userId)));
-      else await sendMessage(env, chatId, optionsPrompt(bound, "已绑定"), optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound)));
+      if (variants) await sendMessage(env, chatId, variantPrompt(bound, "已绑定"), variantMarkup(bound, isAdmin(env, userId)));
+      else await sendMessage(env, chatId, optionsPrompt(bound, "已绑定"), optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound), bound));
       return;
     }
     await setSession(env, userId, session);
@@ -965,6 +979,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const selectedOptions = { ...(session.options || defaults()) };
   const options = { ...selectedOptions };
   delete options.zarm_tool;
+  if (workflowKey !== AOSP_WORKFLOW_KEY) for (const key of AOSP_BOOL_OPTIONS) delete options[key];
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
@@ -1144,7 +1159,7 @@ async function handleCallback(env: Env, update: any) {
       const boundScript = await workflowForUser(env, userId);
       if (boundScript && SCRIPTS[boundScript]) {
         await setSession(env, userId, session);
-        await editMessage(env, chatId, messageId, `已绑定：${SCRIPTS[boundScript][0]}\n请选择风驰版本：`, variantMarkup(boundScript, false));
+        await editMessage(env, chatId, messageId, variantPrompt(boundScript, "已绑定"), variantMarkup(boundScript, false));
         return;
       }
     }
@@ -1160,7 +1175,7 @@ async function handleCallback(env: Env, update: any) {
     delete session.workflow;
     if (!scriptKey || !SCRIPTS[scriptKey]) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[scriptKey][0]}\n请选择风驰版本：`, variantMarkup(scriptKey, isAdmin(env, userId)));
+    await editMessage(env, chatId, messageId, variantPrompt(scriptKey), variantMarkup(scriptKey, isAdmin(env, userId)));
     return;
   }
   if (data.startsWith("bind:")) {
@@ -1172,7 +1187,7 @@ async function handleCallback(env: Env, update: any) {
     const current = await workflowForUser(env, userId);
     if (current && current !== scriptKey) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     const boundScript = await bindWorkflow(env, userId, scriptKey);
-    await editMessage(env, chatId, messageId, `已绑定：${SCRIPTS[boundScript][0]}\n请选择风驰版本：`, variantMarkup(boundScript, false, false));
+    await editMessage(env, chatId, messageId, variantPrompt(boundScript, "已绑定"), variantMarkup(boundScript, false, false));
     return;
   }
   if (data.startsWith("kernel:")) {
@@ -1185,14 +1200,14 @@ async function handleCallback(env: Env, update: any) {
     if (variants) {
       delete session.workflow;
       await setSession(env, userId, session);
-      await editMessage(env, chatId, messageId, `已选择：${SCRIPTS[key][0]}\n请选择风驰版本：`, variantMarkup(key, isAdmin(env, userId) || !boundScript, !isAdmin(env, userId) && !boundScript));
+      await editMessage(env, chatId, messageId, variantPrompt(key), variantMarkup(key, isAdmin(env, userId) || !boundScript, !isAdmin(env, userId) && !boundScript));
       return;
     }
     if (await workflowMaintenance(env, key)) { await editMessage(env, chatId, messageId, "该内核正在建立持久缓存，请稍后再试。"); return; }
     session.workflow = key; session.options ||= defaults();
     applyWorkflowDefaults(key, session.options);
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, optionsPrompt(key), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(key))); return;
+    await editMessage(env, chatId, messageId, optionsPrompt(key), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(key), key)); return;
   }
   if (data.startsWith("variant:")) {
     const [, scriptKey, variantKey] = data.split(":");
@@ -1208,7 +1223,7 @@ async function handleCallback(env: Env, update: any) {
     session.workflow = workflowKey; session.options ||= defaults();
     applyWorkflowDefaults(workflowKey, session.options);
     await setSession(env, userId, session);
-    await editMessage(env, chatId, messageId, optionsPrompt(workflowKey), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey))); return;
+    await editMessage(env, chatId, messageId, optionsPrompt(workflowKey), optionsMarkup(session.options, isAdmin(env, userId) && supportsSelfConfig(workflowKey), workflowKey)); return;
   }
   if (quickOptionsAction && !WORKFLOWS[session.workflow || ""]) {
     await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。");
@@ -1229,6 +1244,7 @@ async function handleCallback(env: Env, update: any) {
   delete options.zarm_tool;
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
+    if (AOSP_BOOL_OPTIONS.has(key) && session.workflow !== AOSP_WORKFLOW_KEY) return;
     if (key === "self_config" && !isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "该配置仅限所有者使用。"); return; }
     const value = options[key] === "true" ? "false" : "true";
     options[key] = value;
@@ -1239,7 +1255,7 @@ async function handleCallback(env: Env, update: any) {
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
   } else if (data === "dispatch") { await dispatchBuild(env, query, session); return; }
   await setSession(env, userId, session);
-  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(session.workflow || "")) });
+  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(session.workflow || ""), session.workflow) });
 }
 
 async function handleJoinRequest(env: Env, update: any) {
