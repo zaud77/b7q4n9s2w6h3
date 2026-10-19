@@ -108,7 +108,7 @@ const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
 const AOSP_WORKFLOW_KEY = "669aosp";
 const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable"]);
-const AOSP_OPTIONS = new Set([...AOSP_BOOL_OPTIONS, "zram_default_algorithm"]);
+const AOSP_OPTIONS = new Set([...AOSP_BOOL_OPTIONS, "zram_default_algorithm", "zram_size_gib"]);
 const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
   ...WORKFLOW_SCRIPTS,
   // Normalize persisted workflow choices back to their device binding keys.
@@ -158,6 +158,10 @@ const ZRAM_VALUES = ["default", "qpace-lz4", "qpace", "lz4kd"];
 const ZRAM_LABELS: Record<string, string> = {
   default: "保持系统默认", "qpace-lz4": "qpace-lz4", qpace: "qpace", lz4kd: "lz4kd",
 };
+const ZRAM_SIZE_VALUES = ["default", "4", "6", "8", "10", "12", "16", "24", "32"];
+const ZRAM_SIZE_LABELS: Record<string, string> = Object.fromEntries(
+  ZRAM_SIZE_VALUES.map(value => [value, value === "default" ? "保持系统默认" : `${value} GiB`])
+);
 const KOWSU_LATEST_RELEASE_API = "https://api.github.com/repos/zaominn/KowSU/releases/latest";
 const KOWSU_MANAGER_ASSET = /^KowSU-Manager-.*\.apk$/i;
 const NOMOUNT_PACKAGE_RE = /^(?!.*-SMOKE-NOT-FOR-INSTALL\.zip$)NoMount-Suite-v([0-9]+(?:\.[0-9]+)*)-LKM(?:-[A-Za-z0-9._-]+)?\.zip$/i;
@@ -172,7 +176,7 @@ function defaults(): Record<string, string> {
   for (const key of Object.keys(BOOL_LABELS)) values[key] = "false";
   return Object.assign(values, {
     ksu_type: "bakasu", lz4_enable: "true", unicode_enable: "true",
-    bbr_enable: "false", droidspaces_enable: "false", zram_default_algorithm: "default",
+    bbr_enable: "false", droidspaces_enable: "false", zram_default_algorithm: "default", zram_size_gib: "default",
     ccache_update: "false", ccache_debug: "false",
   });
 }
@@ -189,6 +193,7 @@ function normalizeBuildOptions(saved: unknown, admin: boolean): Record<string, s
   if (typeof values.bbr_enable === "string" && BBR_VALUES.includes(values.bbr_enable)) options.bbr_enable = values.bbr_enable;
   if (typeof values.droidspaces_enable === "string" && DROID_VALUES.includes(values.droidspaces_enable)) options.droidspaces_enable = values.droidspaces_enable;
   if (typeof values.zram_default_algorithm === "string" && ZRAM_VALUES.includes(values.zram_default_algorithm)) options.zram_default_algorithm = values.zram_default_algorithm;
+  if (typeof values.zram_size_gib === "string" && ZRAM_SIZE_VALUES.includes(values.zram_size_gib)) options.zram_size_gib = values.zram_size_gib;
   if (options.susfs_enable === "true") options.nomount_enable = "false";
   if (!admin) options.self_config = "false";
   return options;
@@ -657,6 +662,9 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
   if (workflowKey === AOSP_WORKFLOW_KEY) rows.push([{
     text: `默认 ZRAM：${ZRAM_LABELS[options.zram_default_algorithm] || ZRAM_LABELS.default}`,
     callback_data: `set:zram_default_algorithm:${nextValue(ZRAM_VALUES, options.zram_default_algorithm || "default")}`,
+  }], [{
+    text: `ZRAM 大小：${ZRAM_SIZE_LABELS[options.zram_size_gib] || ZRAM_SIZE_LABELS.default}`,
+    callback_data: `set:zram_size_gib:${nextValue(ZRAM_SIZE_VALUES, options.zram_size_gib || "default")}`,
   }]);
   rows.push([
     { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: `set:bbr_enable:${nextValue(["false", "true", "default"], options.bbr_enable)}` },
@@ -689,15 +697,20 @@ function optimisticOptionsMarkup(query: any, data: string): any | null {
       bbr_enable: { false: "关闭", true: "开启", default: "默认" },
       droidspaces_enable: { false: "关闭", standard: "标准", extend: "扩展" },
       zram_default_algorithm: ZRAM_LABELS,
+      zram_size_gib: ZRAM_SIZE_LABELS,
     };
     const values: Record<string, string[]> = {
       bbr_enable: ["false", "true", "default"],
       droidspaces_enable: ["false", "standard", "extend"],
       zram_default_algorithm: ZRAM_VALUES,
+      zram_size_gib: ZRAM_SIZE_VALUES,
     };
     if (values[option]?.includes(next)) {
-      const prefix = option === "bbr_enable" ? "BBR" : option === "zram_default_algorithm" ? "默认 ZRAM" : "Droidspaces";
-      target.text = `${prefix}：${cycleLabels[option][next]}`;
+      const prefixes: Record<string, string> = {
+        bbr_enable: "BBR", droidspaces_enable: "Droidspaces",
+        zram_default_algorithm: "默认 ZRAM", zram_size_gib: "ZRAM 大小",
+      };
+      target.text = `${prefixes[option]}：${cycleLabels[option][next]}`;
       const choices = values[option];
       target.callback_data = `set:${option}:${choices[(choices.indexOf(next) + 1) % choices.length]}`;
       return true;
@@ -724,6 +737,7 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   else if (key === "bbr_enable") allowedValues = ["false", "true", "default"];
   else if (key === "droidspaces_enable") allowedValues = ["false", "standard", "extend"];
   else if (key === "zram_default_algorithm") allowedValues = ZRAM_VALUES;
+  else if (key === "zram_size_gib") allowedValues = ZRAM_SIZE_VALUES;
   else return false;
   if (!allowedValues.includes(value)) return false;
 
@@ -1266,7 +1280,7 @@ async function handleCallback(env: Env, update: any) {
   } else if (data.startsWith("cycle:")) {
     const key = data.slice(6);
     if (AOSP_OPTIONS.has(key) && session.workflow !== AOSP_WORKFLOW_KEY) return;
-    const choices = key === "ksu_type" ? KSU_VALUES : key === "bbr_enable" ? BBR_VALUES : key === "droidspaces_enable" ? DROID_VALUES : key === "zram_default_algorithm" ? ZRAM_VALUES : null;
+    const choices = key === "ksu_type" ? KSU_VALUES : key === "bbr_enable" ? BBR_VALUES : key === "droidspaces_enable" ? DROID_VALUES : key === "zram_default_algorithm" ? ZRAM_VALUES : key === "zram_size_gib" ? ZRAM_SIZE_VALUES : null;
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
   } else if (data === "dispatch") { await dispatchBuild(env, query, session); return; }
   await setSession(env, userId, session);
