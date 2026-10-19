@@ -466,6 +466,7 @@ test("AOSP menu keeps its exact name and requires explicit script binding", asyn
   await click("variant:669aosp:gki");
   const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
   assert.deepEqual(buttons.slice(0, 2).map(button => button.callback_data), ["set:zram_writeback_enable:true", "set:qpace_enable:true"]);
+  assert.ok(buttons.some(button => button.text === "默认 ZRAM：保持系统默认" && button.callback_data === "set:zram_default_algorithm:qpace-lz4"));
   assert.ok(!buttons.some(button => button.callback_data.startsWith("set:self_config:")));
   assert.equal(state.workflowBinding, "669aosp");
 });
@@ -474,11 +475,13 @@ test("AOSP dispatch forwards experiments and never inherits the owner-only workf
   const { env, state } = await fixture(t, { workflowBinding: "669aosp" });
   await worker.dispatchBuild(env, query, { serial, workflow: "669aosp", options: {
     ...worker.normalizeBuildOptions({}, true), self_config: "true", zram_writeback_enable: "true", qpace_enable: "true",
+    zram_default_algorithm: "qpace-lz4",
   } });
   const [call] = dispatches(state);
   assert.ok(call.url.endsWith("/actions/workflows/build_aosp_6.12.69_gki.yml/dispatches"));
   assert.equal(call.body.inputs.zram_writeback_enable, "true");
   assert.equal(call.body.inputs.qpace_enable, "true");
+  assert.equal(call.body.inputs.zram_default_algorithm, "qpace-lz4");
   assert.equal(call.body.inputs.self_config, "false");
   assertPrivateMessages(state);
 });
@@ -486,11 +489,18 @@ test("AOSP dispatch forwards experiments and never inherits the owner-only workf
 test("device-specific builds do not receive AOSP-only workflow inputs", async t => {
   const { env, state } = await fixture(t);
   const selected = kernelSession();
-  Object.assign(selected.options, { zram_writeback_enable: "true", qpace_enable: "true" });
+  Object.assign(selected.options, { zram_writeback_enable: "true", qpace_enable: "true", zram_default_algorithm: "qpace" });
   await worker.dispatchBuild(env, query, selected);
   const [call] = dispatches(state);
   assert.equal(call.body.inputs.zram_writeback_enable, undefined);
   assert.equal(call.body.inputs.qpace_enable, undefined);
+  assert.equal(call.body.inputs.zram_default_algorithm, undefined);
+});
+
+test("ZRAM preferences retain only supported compressor choices", () => {
+  for (const algorithm of ["default", "qpace-lz4", "qpace", "lz4kd"])
+    assert.equal(worker.normalizeBuildOptions({ zram_default_algorithm: algorithm }, false).zram_default_algorithm, algorithm);
+  assert.equal(worker.normalizeBuildOptions({ zram_default_algorithm: "invalid" }, false).zram_default_algorithm, "default");
 });
 
 test("BakaSU is the default kernel manager and old ReSukiSU preferences migrate", () => {
