@@ -497,6 +497,7 @@ test("AOSP dispatch forwards experiments and never inherits the owner-only workf
   assert.equal(call.body.inputs.zram_default_algorithm, "qpace-lz4");
   assert.equal(call.body.inputs.zram_size_gib, "16");
   assert.equal(call.body.inputs.self_config, "false");
+  assert.equal(call.body.inputs.hmbird_cpuperf_fix, undefined);
   assertPrivateMessages(state);
 });
 
@@ -527,7 +528,7 @@ test("stale and forged AOSP test callbacks cannot bypass its access gate", async
 test("authorized AOSP test dispatch requires binding and selects the fixed test branch", async t => {
   const { env, state } = await fixture(t, { workflowBinding: null });
   state.botState.set("workflow_access:669aosp-test:42", "1");
-  const draft = { serial, workflow: "669aosp-test", options: { ...worker.normalizeBuildOptions({}, false), qpace_enable: "true", zram_size_gib: "16" } };
+  const draft = { serial, workflow: "669aosp-test", options: { ...worker.normalizeBuildOptions({}, false), qpace_enable: "true", zram_size_gib: "16", hmbird_cpuperf_fix: "true" } };
   await worker.dispatchBuild(env, query, draft);
   assert.equal(dispatches(state).length, 0);
   const click = data => worker.handleCallback(env, { callback_query: { ...query, id: data, data } });
@@ -537,11 +538,15 @@ test("authorized AOSP test dispatch requires binding and selects the fixed test 
   await click("variant:669aosp-test:gki");
   const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
   assert.ok(buttons.some(button => button.callback_data === "set:qpace_enable:true"));
+  assert.ok(buttons.some(button => button.callback_data === "set:hmbird_cpuperf_fix:true"));
   await worker.dispatchBuild(env, query, draft);
   const [call] = dispatches(state);
   assert.equal(call.body.ref, "test/aosp-hmbird-oneplus15-20261020");
   assert.equal(call.body.inputs.qpace_enable, "true");
   assert.equal(call.body.inputs.zram_size_gib, "16");
+  assert.equal(call.body.inputs.hmbird_cpuperf_fix, "true");
+  assert.equal(call.body.inputs.ccache_update, undefined);
+  assert.equal(call.body.inputs.ccache_debug, undefined);
   assert.equal(call.body.inputs.github_ref, undefined);
   assert.equal(JSON.parse(state.jobs[0].inputs).github_ref, call.body.ref);
   assert.equal(state.workflowBinding, "669aosp-test");
@@ -614,13 +619,16 @@ test("non-admins cannot grant test access or unbind scripts", async t => {
 test("device-specific builds do not receive AOSP-only workflow inputs", async t => {
   const { env, state } = await fixture(t);
   const selected = kernelSession();
-  Object.assign(selected.options, { zram_writeback_enable: "true", qpace_enable: "true", zram_default_algorithm: "qpace", zram_size_gib: "16" });
+  Object.assign(selected.options, { zram_writeback_enable: "true", qpace_enable: "true", zram_default_algorithm: "qpace", zram_size_gib: "16", hmbird_cpuperf_fix: "true", ccache_update: "false", ccache_debug: "false" });
   await worker.dispatchBuild(env, query, selected);
   const [call] = dispatches(state);
   assert.equal(call.body.inputs.zram_writeback_enable, undefined);
   assert.equal(call.body.inputs.qpace_enable, undefined);
   assert.equal(call.body.inputs.zram_default_algorithm, undefined);
   assert.equal(call.body.inputs.zram_size_gib, undefined);
+  assert.equal(call.body.inputs.hmbird_cpuperf_fix, undefined);
+  assert.equal(call.body.inputs.ccache_update, "false");
+  assert.equal(call.body.inputs.ccache_debug, "false");
 });
 
 test("ZRAM preferences retain only supported compressor and size choices", () => {
@@ -705,20 +713,27 @@ test("old administrator menus cannot submit a newer draft's workflow or options"
 
 test("quick options atomically enforce both the test grant and the originating menu", async t => {
   const { env, state, database, timestamp } = await quotaFixture(t);
-  database.prepare("INSERT INTO bot_state VALUES(?,?)").run("workflow_access:669aosp-test:42", "1");
-  const draft = { serial, workflow: "669aosp-test", options: { qpace_enable: "false" }, menuMessageId: 9, menuChatId: 42 };
-  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, JSON.stringify(draft), timestamp);
-  const click = messageId => worker.handleCallback(env, { callback_query: { ...query, id: "option", data: "set:qpace_enable:true",
-    message: { ...query.message, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: "QPaCE", callback_data: "set:qpace_enable:true" }]] } } } });
-  const value = () => JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data).options.qpace_enable;
-  await click(8);
-  assert.equal(value(), "false");
-  await click(9);
-  assert.equal(value(), "true");
-  database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify(draft));
-  database.prepare("UPDATE bot_state SET value='0' WHERE key=?").run("workflow_access:669aosp-test:42");
-  await click(9);
-  assert.equal(value(), "false");
+  for (const key of ["qpace_enable", "hmbird_cpuperf_fix"]) {
+    database.prepare("INSERT OR REPLACE INTO bot_state VALUES(?,?)").run("workflow_access:669aosp-test:42", "1");
+    const draft = { serial, workflow: "669aosp-test", options: { [key]: "false" }, menuMessageId: 9, menuChatId: 42 };
+    database.prepare("INSERT OR REPLACE INTO sessions VALUES(?,?,?)").run(42, JSON.stringify(draft), timestamp);
+    const click = messageId => worker.handleCallback(env, { callback_query: { ...query, id: "option", data: `set:${key}:true`,
+      message: { ...query.message, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: key, callback_data: `set:${key}:true` }]] } } } });
+    const value = () => JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data).options[key];
+    await click(8);
+    assert.equal(value(), "false");
+    await click(9);
+    assert.equal(value(), "true");
+    database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify(draft));
+    database.prepare("UPDATE bot_state SET value='0' WHERE key=?").run("workflow_access:669aosp-test:42");
+    await click(9);
+    assert.equal(value(), "false");
+    if (key === "hmbird_cpuperf_fix") {
+      database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify({ ...draft, workflow: "669aosp" }));
+      await click(9);
+      assert.equal(value(), "false");
+    }
+  }
   assert.equal(dispatches(state).length, 0);
 });
 

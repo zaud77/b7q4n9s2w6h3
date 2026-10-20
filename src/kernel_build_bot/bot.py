@@ -114,6 +114,7 @@ LEGACY_WORKFLOW_KEYS = {
 BOOL_LABELS = {
     "zram_writeback_enable": "独立回写（实验）",
     "qpace_enable": "QPaCE（实验）",
+    "hmbird_cpuperf_fix": "风驰 CPUPerf 时钟修复（实验）",
     "self_config": "自用配置",
     "susfs_enable": "SUSFS",
     "nomount_enable": "NoMount",
@@ -128,6 +129,7 @@ BOOL_LABELS = {
 }
 BOOL_OPTION_ROWS = (
     ("zram_writeback_enable", "qpace_enable"),
+    ("hmbird_cpuperf_fix",),
     ("susfs_enable", "nomount_enable"),
     ("kpm_enable", "lz4_enable"),
     ("lz4kd_enable", "unicode_enable"),
@@ -654,6 +656,7 @@ class KernelBuildBot:
                 for key in keys
                 if (key != "self_config" or show_self_config)
                 and (key not in AOSP_BOOL_OPTIONS or workflow_key in AOSP_WORKFLOW_KEYS)
+                and (key != "hmbird_cpuperf_fix" or workflow_key == AOSP_TEST_WORKFLOW_KEY)
             ]
             if row:
                 rows.append(row)
@@ -842,6 +845,8 @@ class KernelBuildBot:
             _, key, new_value = data.split(":", 2)
             if key in AOSP_BOOL_OPTIONS and workflow_key not in AOSP_WORKFLOW_KEYS:
                 return
+            if key == "hmbird_cpuperf_fix" and workflow_key != AOSP_TEST_WORKFLOW_KEY:
+                return
             if key in BOOL_LABELS and new_value in {"false", "true"}:
                 if key == "self_config" and not self.is_admin(query.from_user.id):
                     await query.edit_message_text("该配置仅限所有者使用。")
@@ -862,6 +867,8 @@ class KernelBuildBot:
         elif data.startswith("toggle:"):
             key = data.split(":", 1)[1]
             if key in AOSP_BOOL_OPTIONS and workflow_key not in AOSP_WORKFLOW_KEYS:
+                return
+            if key == "hmbird_cpuperf_fix" and workflow_key != AOSP_TEST_WORKFLOW_KEY:
                 return
             if key not in BOOL_LABELS:
                 return
@@ -946,6 +953,12 @@ class KernelBuildBot:
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
         inputs.pop("zarm_tool", None)
+        if workflow_key == AOSP_TEST_WORKFLOW_KEY:
+            inputs.pop("ccache_update", None)
+            inputs.pop("ccache_debug", None)
+            inputs["hmbird_cpuperf_fix"] = "true" if inputs.get("hmbird_cpuperf_fix") == "true" else "false"
+        else:
+            inputs.pop("hmbird_cpuperf_fix", None)
         if workflow_key not in AOSP_WORKFLOW_KEYS:
             for key in AOSP_BOOL_OPTIONS:
                 inputs.pop(key, None)

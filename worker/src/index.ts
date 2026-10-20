@@ -133,6 +133,7 @@ const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
 const BOOL_LABELS: Record<string, string> = {
   zram_writeback_enable: "独立回写（实验）",
   qpace_enable: "QPaCE（实验）",
+  hmbird_cpuperf_fix: "风驰 CPUPerf 时钟修复（实验）",
   self_config: "自用配置",
   susfs_enable: "SUSFS",
   nomount_enable: "NoMount",
@@ -147,6 +148,7 @@ const BOOL_LABELS: Record<string, string> = {
 };
 const BOOL_OPTION_ROWS = [
   ["zram_writeback_enable", "qpace_enable"],
+  ["hmbird_cpuperf_fix"],
   ["susfs_enable", "nomount_enable"],
   ["kpm_enable", "lz4_enable"],
   ["lz4kd_enable", "unicode_enable"],
@@ -721,6 +723,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
     const row = keys
       .filter(key => key !== "self_config" || showSelf)
       .filter(key => !AOSP_BOOL_OPTIONS.has(key) || AOSP_WORKFLOW_KEYS.has(workflowKey))
+      .filter(key => key !== "hmbird_cpuperf_fix" || workflowKey === AOSP_TEST_WORKFLOW_KEY)
       .map(key => ({
         text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
         callback_data: `set:${key}:${options[key] === "true" ? "false" : "true"}`,
@@ -820,6 +823,7 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.${name}`, next]);
   params.push(now(), userId);
   const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp','669aosp-test')"
+    : key === "hmbird_cpuperf_fix" ? " AND json_extract(data,'$.workflow')='669aosp-test'"
     : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow') IN ('669aosp','669aosp-test')" : "";
   const accessGuard = admin ? "" : " AND (json_extract(data,'$.workflow')!='669aosp-test' OR EXISTS (SELECT 1 FROM bot_state WHERE key=? AND value='1'))";
   if (!admin) params.push(`${AOSP_TEST_ACCESS_PREFIX}${userId}`);
@@ -1113,6 +1117,11 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const options = { ...selectedOptions };
   delete options.zarm_tool;
   if (!AOSP_WORKFLOW_KEYS.has(workflowKey)) for (const key of AOSP_OPTIONS) delete options[key];
+  if (workflowKey === AOSP_TEST_WORKFLOW_KEY) {
+    delete options.ccache_update;
+    delete options.ccache_debug;
+    options.hmbird_cpuperf_fix = options.hmbird_cpuperf_fix === "true" ? "true" : "false";
+  } else delete options.hmbird_cpuperf_fix;
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
@@ -1392,6 +1401,7 @@ async function handleCallback(env: Env, update: any) {
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
     if (AOSP_BOOL_OPTIONS.has(key) && !AOSP_WORKFLOW_KEYS.has(session.workflow || "")) return;
+    if (key === "hmbird_cpuperf_fix" && session.workflow !== AOSP_TEST_WORKFLOW_KEY) return;
     if (key === "self_config" && !isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "该配置仅限所有者使用。"); return; }
     const value = options[key] === "true" ? "false" : "true";
     options[key] = value;
