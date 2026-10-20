@@ -19,7 +19,7 @@ const serial = "TEST_DEVICE_123";
 const query = { from: { id: 42 }, message: { chat: { id: 42, type: "private" }, message_id: 7 } };
 
 async function fixture(t, overrides = {}) {
-  const state = { bound: serial, workflowBinding: "623", enabled: true, member: true, count: 0, latest: null, sessions: new Map(), jobs: [], calls: [], dispatchStatus: 204, ...overrides };
+  const state = { bound: serial, workflowBinding: "623", enabled: true, member: true, count: 0, latest: null, sessions: new Map(), botState: new Map(), jobs: [], calls: [], dispatchStatus: 204, ...overrides };
   const env = { ADMIN_USER_IDS: "1", SERIAL_PEPPER: "fixture-pepper", GITHUB_TOKEN: "old-kernel-fixture-token",
     KERNEL_GITHUB_TOKEN: "new-kernel-fixture-token", LKM_GITHUB_TOKEN: "new-lkm-fixture-token",
     GITHUB_REPO: "zaud77/k6r9m2p7v4x8", LKM_GITHUB_REPO: "zaud77/m8v3p6r9x2k4",
@@ -31,7 +31,7 @@ async function fixture(t, overrides = {}) {
     return {
       bind(...args) { values = args; return this; },
       async first() {
-        if (sql.includes("SELECT value FROM bot_state")) return { value: "done" };
+        if (sql.includes("SELECT value FROM bot_state")) return { value: state.botState.get(values[0]) || "done" };
         if (sql.includes("SELECT serial_value")) return state.bound ? { serial_value: state.bound } : null;
         if (sql.includes("SELECT workflow_key")) return state.workflowBinding ? { workflow_key: state.workflowBinding } : null;
         if (sql.includes("SELECT 1 AS yes FROM build_jobs")) return state.jobs.some(job => job.active_user_id === values[0]) ? { yes: 1 } : null;
@@ -43,9 +43,9 @@ async function fixture(t, overrides = {}) {
       async run() {
         if (sql.includes("INSERT INTO sessions")) state.sessions.set(values[0], values[1]);
         if (sql.includes("INSERT INTO workflow_bindings")) state.workflowBinding ||= values[1];
-        if (sql.includes("DELETE FROM sessions")) state.sessions.delete(values[0]);
+        if (sql.includes("DELETE FROM sessions") && (values.length === 1 || state.sessions.get(values[0]) === values[1])) state.sessions.delete(values[0]);
         if (sql.includes("INSERT INTO build_jobs")) {
-          if (state.jobs.some(job => job.active_user_id === values[2] || job.request_id === values[0])) throw new Error("unique job constraint");
+          if (state.jobs.some(job => values[2] != null && job.active_user_id === values[2] || job.request_id === values[0])) throw new Error("unique job constraint");
           state.jobs.push({ request_id: values[0], telegram_user_id: values[1], active_user_id: values[2], chat_id: values[3], workflow_file: values[4], inputs: values[5], status: "submitted", created_at: values[6] });
         }
         if (sql.includes("SET status='delivering'")) {
@@ -69,7 +69,7 @@ async function fixture(t, overrides = {}) {
     const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
     state.calls.push({ url: String(url), options, body });
     if (String(url).includes("api.telegram.org")) {
-      const result = String(url).endsWith("getChatMember") ? { status: state.member ? "member" : "left" } : { chat: { type: "private", id: 42 }, message_id: 8 };
+      const result = String(url).endsWith("getChatMember") ? { status: state.member ? "member" : "left" } : { chat: { type: "private", id: 42 }, message_id: state.messageId || 8 };
       return Response.json({ ok: true, result });
     }
     if (String(url).endsWith("/dispatches")) {
@@ -96,7 +96,19 @@ async function quotaFixture(t) {
       bind(...args) { values = args; return this; },
       async first() { return statement.get(...values) || null; },
       async run() { return { meta: { changes: statement.run(...values).changes } }; },
+      async all() { return { results: statement.all(...values) }; },
     };
+  }, async batch(statements) {
+    database.exec("BEGIN");
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      database.exec("COMMIT");
+      return results;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
   } };
   const timestamp = Math.floor(Date.now() / 1000);
   database.prepare("INSERT INTO serial_bindings(serial_hash,serial_value,owner_user_id,created_at,created_by) VALUES(?,?,?,?,?)")
@@ -488,6 +500,117 @@ test("AOSP dispatch forwards experiments and never inherits the owner-only workf
   assertPrivateMessages(state);
 });
 
+test("AOSP test entry is visible only to administrators or explicitly granted users", async t => {
+  const { env, state } = await fixture(t, { workflowBinding: null });
+  const menu = async () => {
+    await worker.handleCommand(env, { message: { from: query.from, chat: query.message.chat } }, "build", []);
+    return state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
+  };
+  assert.ok(!(await menu()).some(button => button.callback_data === "kernel:669aosp-test"));
+  state.botState.set("workflow_access:669aosp-test:42", "1");
+  assert.ok((await menu()).some(button => button.callback_data === "kernel:669aosp-test"));
+  state.botState.clear();
+  env.ADMIN_USER_IDS = "42";
+  assert.ok((await menu()).some(button => button.callback_data === "kernel:669aosp-test"));
+});
+
+test("stale and forged AOSP test callbacks cannot bypass its access gate", async t => {
+  const { env, state } = await fixture(t, { workflowBinding: "669aosp-test" });
+  state.sessions.set(42, JSON.stringify({ serial, selectedScript: "669aosp-test", workflow: "669aosp-test", options: {} }));
+  for (const data of ["kernel:669aosp-test", "bind:669aosp-test", "variant:669aosp-test:gki", "dispatch"])
+    await worker.handleCallback(env, { callback_query: { ...query, id: data, data } });
+  await worker.dispatchBuild(env, query, { serial, workflow: "669aosp-test", options: {} });
+  assert.equal(dispatches(state).length, 0);
+  assert.ok(state.calls.filter(call => call.body?.text?.includes("尚未向你开放")).length >= 5);
+});
+
+test("authorized AOSP test dispatch requires binding and selects the fixed test branch", async t => {
+  const { env, state } = await fixture(t, { workflowBinding: null });
+  state.botState.set("workflow_access:669aosp-test:42", "1");
+  const draft = { serial, workflow: "669aosp-test", options: { ...worker.normalizeBuildOptions({}, false), qpace_enable: "true", zram_size_gib: "16" } };
+  await worker.dispatchBuild(env, query, draft);
+  assert.equal(dispatches(state).length, 0);
+  const click = data => worker.handleCallback(env, { callback_query: { ...query, id: data, data } });
+  state.sessions.set(42, JSON.stringify({ serial, options: {} }));
+  await click("kernel:669aosp-test");
+  await click("bind:669aosp-test");
+  await click("variant:669aosp-test:gki");
+  const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
+  assert.ok(buttons.some(button => button.callback_data === "set:qpace_enable:true"));
+  await worker.dispatchBuild(env, query, draft);
+  const [call] = dispatches(state);
+  assert.equal(call.body.ref, "test/aosp-hmbird-oneplus15-20261020");
+  assert.equal(call.body.inputs.qpace_enable, "true");
+  assert.equal(call.body.inputs.zram_size_gib, "16");
+  assert.equal(call.body.inputs.github_ref, undefined);
+  assert.equal(JSON.parse(state.jobs[0].inputs).github_ref, call.body.ref);
+  assert.equal(state.workflowBinding, "669aosp-test");
+  assertPrivateMessages(state);
+});
+
+test("AOSP grant unbinds only the intended user and preserves identity, preferences and jobs", async t => {
+  const { env, database, timestamp, addJob } = await quotaFixture(t);
+  addJob({ status: "running" });
+  database.prepare("INSERT INTO user_build_preferences VALUES(?,?,?)").run(42, '{"qpace_enable":"true"}', timestamp);
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, '{"workflow":"623g"}', timestamp);
+  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(99, "669aosp", timestamp);
+  const update = { message: { from: { id: 1 }, chat: { id: 1, type: "private" } } };
+  await worker.handleCommand(env, update, "aosptest", [serial]);
+  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key=?").get("workflow_access:669aosp-test:42").value, "1");
+  assert.equal(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
+  assert.equal(database.prepare("SELECT * FROM sessions WHERE telegram_user_id=42").get(), undefined);
+  assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=99").get().workflow_key, "669aosp");
+  assert.equal(database.prepare("SELECT owner_user_id FROM serial_bindings").get().owner_user_id, 42);
+  assert.equal(database.prepare("SELECT options FROM user_build_preferences WHERE telegram_user_id=42").get().options, '{"qpace_enable":"true"}');
+  assert.equal(database.prepare("SELECT status FROM build_jobs").get().status, "running");
+  await worker.handleCommand(env, update, "aosptest", ["99"]);
+  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key=?").get("workflow_access:669aosp-test:99").value, "1");
+});
+
+test("test access revocation invalidates test binding and stale drafts without changing regular bindings", async t => {
+  const { env, state, database, timestamp } = await quotaFixture(t);
+  const update = { message: { from: { id: 1 }, chat: { id: 1, type: "private" } } };
+  await worker.handleCommand(env, update, "aosptest", ["42"]);
+  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(42, "669aosp-test", timestamp);
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, '{"workflow":"669aosp-test"}', timestamp);
+  await worker.handleCommand(env, update, "aosptest", ["42", "off"]);
+  assert.equal(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
+  assert.equal(database.prepare("SELECT * FROM sessions WHERE telegram_user_id=42").get(), undefined);
+  await worker.dispatchBuild(env, query, { serial, workflow: "669aosp-test", options: {} });
+  assert.equal(dispatches(state).length, 0);
+  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(42, "623", timestamp);
+  await worker.handleCommand(env, update, "aosptest", ["42", "off"]);
+  assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=42").get().workflow_key, "623");
+});
+
+test("script unbinding supports a serial or all users without resetting grants, quotas or current jobs", async t => {
+  const { env, database, timestamp, addJob, countFailures } = await quotaFixture(t);
+  addJob({ status: "running" });
+  countFailures();
+  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(99, "669aosp", timestamp);
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, '{"workflow":"623g"}', timestamp);
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(99, '{"workflow":"669aosp"}', timestamp);
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(100, '{"awaitingJoinSerial":true}', timestamp);
+  const update = { message: { from: { id: 1 }, chat: { id: 1, type: "private" } } };
+  await worker.handleCommand(env, update, "unbindscript", [serial]);
+  assert.equal(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
+  assert.ok(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=99").get());
+  await worker.handleCommand(env, update, "unbindscript", ["all"]);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM workflow_bindings").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM serial_bindings").get().count, 1);
+  assert.equal(database.prepare("SELECT status FROM build_jobs").get().status, "running");
+  assert.ok(database.prepare("SELECT * FROM sessions WHERE telegram_user_id=100").get());
+  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key='quota_count_failures:42'").get().value, "1");
+});
+
+test("non-admins cannot grant test access or unbind scripts", async t => {
+  const { env, database } = await quotaFixture(t);
+  for (const [command, args] of [["aosptest", ["42"]], ["unbindscript", ["all"]]])
+    await worker.handleCommand(env, { message: { from: query.from, chat: query.message.chat } }, command, args);
+  assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=42").get().workflow_key, "623");
+  assert.equal(database.prepare("SELECT * FROM bot_state WHERE key=?").get("workflow_access:669aosp-test:42"), undefined);
+});
+
 test("device-specific builds do not receive AOSP-only workflow inputs", async t => {
   const { env, state } = await fixture(t);
   const selected = kernelSession();
@@ -530,13 +653,87 @@ test("kernel and LKM share the same concurrent active slot", async t => {
   assert.equal(state.jobs.length, 1);
 });
 
-test("admin quota exemption still permits only one concurrent active build", async t => {
+test("admins can submit concurrent kernel and LKM jobs without consuming the regular-user slot", async t => {
   const { env, state } = await fixture(t, { count: 99, latest: Math.floor(Date.now() / 1000) });
   env.ADMIN_USER_IDS = "42";
   await Promise.all([worker.dispatchBuild(env, query, kernelSession()), worker.dispatchNoMountBuild(env, query, session(), requestId)]);
-  assert.equal(dispatches(state).length, 1);
-  assert.equal(state.jobs.length, 1);
-  assert.equal(state.jobs[0].active_user_id, 42);
+  assert.equal(dispatches(state).length, 2);
+  assert.equal(state.jobs.length, 2);
+  assert.ok(state.jobs.every(job => job.active_user_id === null));
+});
+
+test("admin kernel requests are parallel across menus but duplicate confirmations are idempotent", async t => {
+  const { env, state } = await fixture(t);
+  env.ADMIN_USER_IDS = "42";
+  const other = { ...query, message: { ...query.message, message_id: 8 } };
+  await Promise.all([
+    worker.dispatchBuild(env, query, kernelSession()),
+    worker.dispatchBuild(env, query, kernelSession()),
+    worker.dispatchBuild(env, other, kernelSession()),
+  ]);
+  assert.equal(dispatches(state).length, 2);
+  assert.equal(new Set(state.jobs.map(job => job.request_id)).size, 2);
+  assert.ok(state.jobs.every(job => job.active_user_id === null));
+});
+
+test("a finishing submission does not erase a newer administrator draft", async t => {
+  const { env, state } = await fixture(t);
+  env.ADMIN_USER_IDS = "42";
+  const next = JSON.stringify({ serial, workflow: "669aosp-test", options: { qpace_enable: "true" } });
+  state.sessions.set(42, next);
+  await worker.dispatchBuild(env, query, kernelSession());
+  assert.equal(state.sessions.get(42), next);
+});
+
+test("old administrator menus cannot submit a newer draft's workflow or options", async t => {
+  const { env, state, database } = await quotaFixture(t);
+  env.ADMIN_USER_IDS = "42";
+  const update = { message: { from: query.from, chat: query.message.chat } };
+  await worker.handleCommand(env, update, "build", []);
+  let draft = JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data);
+  assert.equal(draft.menuMessageId, 8);
+  const originalToken = draft.menuToken;
+  state.messageId = 9;
+  await worker.handleCommand(env, update, "build", []);
+  draft = JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data);
+  assert.notEqual(draft.menuToken, originalToken);
+  assert.equal(draft.menuMessageId, 9);
+  await worker.handleCallback(env, { callback_query: { ...query, id: "old-menu", data: "dispatch", message: { ...query.message, message_id: 8 } } });
+  assert.equal(dispatches(state).length, 0);
+  assert.match(state.calls.at(-1).body.text, /菜单已失效/);
+});
+
+test("quick options atomically enforce both the test grant and the originating menu", async t => {
+  const { env, state, database, timestamp } = await quotaFixture(t);
+  database.prepare("INSERT INTO bot_state VALUES(?,?)").run("workflow_access:669aosp-test:42", "1");
+  const draft = { serial, workflow: "669aosp-test", options: { qpace_enable: "false" }, menuMessageId: 9, menuChatId: 42 };
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, JSON.stringify(draft), timestamp);
+  const click = messageId => worker.handleCallback(env, { callback_query: { ...query, id: "option", data: "set:qpace_enable:true",
+    message: { ...query.message, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: "QPaCE", callback_data: "set:qpace_enable:true" }]] } } } });
+  const value = () => JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data).options.qpace_enable;
+  await click(8);
+  assert.equal(value(), "false");
+  await click(9);
+  assert.equal(value(), "true");
+  database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify(draft));
+  database.prepare("UPDATE bot_state SET value='0' WHERE key=?").run("workflow_access:669aosp-test:42");
+  await click(9);
+  assert.equal(value(), "false");
+  assert.equal(dispatches(state).length, 0);
+});
+
+test("test jobs cannot associate a same-title run from the regular branch", async t => {
+  const { env, state, database, timestamp } = await quotaFixture(t);
+  const ref = "test/aosp-hmbird-oneplus15-20261020";
+  const inputs = JSON.stringify({ build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref });
+  database.prepare("INSERT INTO build_jobs(request_id,telegram_user_id,chat_id,workflow_file,inputs,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+    .run(requestId, 42, 42, "build_aosp_6.12.69_gki.yml", inputs, "submitted", timestamp, timestamp);
+  state.githubResponse = async () => Response.json({ workflow_runs: [
+    { id: 99, display_title: requestId, head_branch: "main", status: "in_progress" },
+    { id: 100, display_title: requestId, head_branch: ref, status: "in_progress" },
+  ] });
+  await worker.processJob(env, database.prepare("SELECT * FROM build_jobs WHERE request_id=?").get(requestId));
+  assert.equal(database.prepare("SELECT github_run_id FROM build_jobs WHERE request_id=?").get(requestId).github_run_id, 100);
 });
 
 for (const kind of ["kernel", "lkm"]) {
@@ -685,9 +882,9 @@ test("admins remain exempt even with a failure policy", async t => {
   assert.equal(await worker.buildQuotaMessage(env, 42), null);
 });
 
-test("rejected kernel dispatch does not charge the quota or block a retry", async t => {
+test("rejected kernel dispatch does not charge the quota or block a fresh-menu retry", async t => {
   const { env, state } = await fixture(t, { dispatchStatus: 403 });
-  await worker.dispatchBuild(env, query, kernelSession());
+  await worker.dispatchBuild(env, { ...query, message: { ...query.message, message_id: 8 } }, kernelSession());
   assert.equal(state.jobs[0].status, "failed");
   assert.equal(state.jobs[0].active_user_id, null);
   assert.equal(state.count, 0);

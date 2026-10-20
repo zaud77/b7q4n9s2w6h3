@@ -157,6 +157,10 @@ class Database:
                     "DELETE FROM pending_joins WHERE telegram_user_id=?",
                     (row["owner_user_id"],),
                 )
+                db.execute(
+                    "DELETE FROM bot_state WHERE key LIKE ?",
+                    (f"workflow_access:%:{row['owner_user_id']}",),
+                )
             return cursor.rowcount > 0
 
     def owner_for_serial(self, serial: str) -> int | None:
@@ -200,6 +204,41 @@ class Database:
                 (user_id,),
             ).fetchone()
             return row["workflow_key"] if row else None
+
+    def workflow_access(self, user_id: int, workflow_key: str) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT value FROM bot_state WHERE key=?",
+                (f"workflow_access:{workflow_key}:{user_id}",),
+            ).fetchone()
+        return bool(row and row["value"] == "1")
+
+    def set_workflow_access(self, user_id: int, workflow_key: str, enabled: bool) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO bot_state(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (f"workflow_access:{workflow_key}:{user_id}", "1" if enabled else "0"),
+            )
+            if enabled:
+                db.execute("DELETE FROM workflow_bindings WHERE telegram_user_id=?", (user_id,))
+            else:
+                db.execute(
+                    "DELETE FROM workflow_bindings WHERE telegram_user_id=? AND workflow_key=?",
+                    (user_id, workflow_key),
+                )
+
+    def unbind_workflows(self, user_id: int | None = None) -> list[int]:
+        with self._connect() as db:
+            if user_id is None:
+                rows = db.execute("SELECT telegram_user_id FROM workflow_bindings").fetchall()
+                db.execute("DELETE FROM workflow_bindings")
+            else:
+                rows = db.execute(
+                    "SELECT telegram_user_id FROM workflow_bindings WHERE telegram_user_id=?", (user_id,)
+                ).fetchall()
+                db.execute("DELETE FROM workflow_bindings WHERE telegram_user_id=?", (user_id,))
+        return [row["telegram_user_id"] for row in rows]
 
     def get_build_preferences(self, user_id: int) -> dict[str, str]:
         with self._connect() as db:

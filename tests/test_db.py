@@ -11,6 +11,7 @@ from kernel_build_bot.bot import (
     options_prompt,
     parse_whitelist,
     variant_markup,
+    script_markup,
     supports_self_config,
     WORKFLOWS,
     KSU_VALUES,
@@ -106,10 +107,13 @@ def test_data_migration_deletes_legacy_bindings_and_revoked_serials(tmp_path):
 
 
 def test_workflow_menu_and_oneplus15t_defaults():
-    assert list(SCRIPTS) == ["669aosp", "623", "638t", "623m", "638a", "658", "658m"]
+    assert list(SCRIPTS) == ["669aosp-test", "669aosp", "623", "638t", "623m", "638a", "658", "658m"]
     assert SCRIPTS["669aosp"][0] == "6.12.69·AOSP"
     assert WORKFLOWS["669aosp"][1] == "build_aosp_6.12.69_gki.yml"
     assert supports_self_config("669aosp")
+    assert supports_self_config("669aosp-test")
+    assert all(button.callback_data != "kernel:669aosp-test" for row in script_markup().inline_keyboard for button in row)
+    assert any(button.callback_data == "kernel:669aosp-test" for row in script_markup(True).inline_keyboard for button in row)
     assert [label for label, _ in SCRIPTS["623"][1].values()] == ["金标", "紫标"]
     assert [label for label, _ in SCRIPTS["638t"][1].values()] == ["金标", "紫标"]
     assert [label for label, _ in SCRIPTS["623m"][1].values()] == ["金标", "紫标"]
@@ -166,6 +170,42 @@ def test_legacy_workflow_bindings_are_normalized():
     assert normalize_workflow_key("658mg") == "658m"
     assert normalize_workflow_key("658mp") == "658m"
     assert normalize_workflow_key(None) is None
+
+
+def test_test_workflow_grant_and_unbinding_preserve_user_identity_and_preferences(tmp_path):
+    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    db.allow_serial("TEST_DEVICE_123", 42, 1)
+    db.bind_workflow(42, "623")
+    db.bind_workflow(99, "669aosp")
+    db.save_build_preferences(42, {"qpace_enable": "true"})
+    db.create_build_job("running-job", 42, 42, "kernel.yml")
+    assert not db.workflow_access(42, "669aosp-test")
+    db.set_workflow_access(42, "669aosp-test", True)
+    assert db.workflow_access(42, "669aosp-test")
+    assert db.workflow_for_user(42) is None
+    assert db.workflow_for_user(99) == "669aosp"
+    assert db.serial_for_user(42) == "TEST_DEVICE_123"
+    assert db.get_build_preferences(42) == {"qpace_enable": "true"}
+    assert db.has_active_build_job(42)
+    db.bind_workflow(42, "669aosp-test")
+    db.set_workflow_access(42, "669aosp-test", False)
+    assert not db.workflow_access(42, "669aosp-test")
+    assert db.workflow_for_user(42) is None
+    db.bind_workflow(42, "623")
+    db.set_workflow_access(42, "669aosp-test", False)
+    assert db.workflow_for_user(42) == "623"
+    assert db.unbind_workflows(42) == [42]
+    assert db.unbind_workflows() == [99]
+    assert db.has_active_build_job(42)
+    assert db.serial_for_user(42) == "TEST_DEVICE_123"
+
+
+def test_revoking_serial_also_revokes_its_test_workflow_grant(tmp_path):
+    db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    db.allow_serial("TEST_DEVICE_123", 42, 1)
+    db.set_workflow_access(42, "669aosp-test", True)
+    db.revoke_serial("TEST_DEVICE_123")
+    assert not db.workflow_access(42, "669aosp-test")
 
 
 def test_pending_build_job_survives_database_reopen(tmp_path):

@@ -43,7 +43,9 @@ jobs:
               and .quotaMigration == "migration:successful-build-quota-v1"
               and .chatHistoryMigration == "migration:private-chat-clear-v1"
               and .buildPreferencesMigration == "migration:user-build-preferences-v1"
-              and .commandMenus == "commands:scoped-menus-v5"
+              and .commandMenus == "commands:scoped-menus-v6"
+              and .adminParallelBuilds == true
+              and .aospTestAccess == "admin-or-grant"
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
               and .kernelRepository == "zaud77/k6r9m2p7v4x8"

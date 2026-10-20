@@ -28,6 +28,9 @@ type Session = {
   ownerDirectedBuild?: boolean;
   deliveryChatId?: number;
   nomountRequestId?: string;
+  menuToken?: string;
+  menuMessageId?: number;
+  menuChatId?: number;
 };
 
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
@@ -35,7 +38,7 @@ const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
 const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
-const COMMAND_MENU_REVISION = "commands:scoped-menus-v5";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v6";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
@@ -56,10 +59,15 @@ const ADMIN_COMMANDS = [
   { command: "allow", description: "添加白名单序列号" },
   { command: "revoke", description: "撤销白名单序列号" },
   { command: "resetquota", description: "重置序列号构建次数" },
+  { command: "unbindscript", description: "解除指定序列号或全部用户的脚本绑定" },
+  { command: "aosptest", description: "授权或撤销用户的 AOSP 风驰测试入口" },
   { command: "allowed", description: "查看完整白名单" },
   { command: "joinlink", description: "获取入群验证链接" },
 ];
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
+  "669aosp-test": ["6.12.69·AOSP（风驰测试）", {
+    gki: ["通用 GKI", "669aosp-test"],
+  }],
   "669aosp": ["6.12.69·AOSP", {
     gki: ["通用 GKI", "669aosp"],
   }],
@@ -87,6 +95,7 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
   }],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
+  "669aosp-test": ["6.12.69·AOSP（风驰测试）", "build_aosp_6.12.69_gki.yml"],
   "669aosp": ["6.12.69·AOSP", "build_aosp_6.12.69_gki.yml"],
   "623g": ["6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
   "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
@@ -107,6 +116,10 @@ const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
 const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
 const AOSP_WORKFLOW_KEY = "669aosp";
+const AOSP_TEST_WORKFLOW_KEY = "669aosp-test";
+const AOSP_TEST_REF = "test/aosp-hmbird-oneplus15-20261020";
+const AOSP_TEST_ACCESS_PREFIX = `workflow_access:${AOSP_TEST_WORKFLOW_KEY}:`;
+const AOSP_WORKFLOW_KEYS = new Set([AOSP_WORKFLOW_KEY, AOSP_TEST_WORKFLOW_KEY]);
 const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable"]);
 const AOSP_OPTIONS = new Set([...AOSP_BOOL_OPTIONS, "zram_default_algorithm", "zram_size_gib"]);
 const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
@@ -171,6 +184,12 @@ function admins(env: Env): Set<number> {
   return new Set(env.ADMIN_USER_IDS.split(",").map(v => Number(v.trim())).filter(Boolean));
 }
 function isAdmin(env: Env, userId: number): boolean { return admins(env).has(userId); }
+async function canUseScript(env: Env, userId: number, key: string): Promise<boolean> {
+  if (key !== AOSP_TEST_WORKFLOW_KEY || isAdmin(env, userId)) return true;
+  const row: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?")
+    .bind(`${AOSP_TEST_ACCESS_PREFIX}${userId}`).first();
+  return row?.value === "1";
+}
 function defaults(): Record<string, string> {
   const values: Record<string, string> = {};
   for (const key of Object.keys(BOOL_LABELS)) values[key] = "false";
@@ -236,10 +255,10 @@ function optionsPrompt(workflowKey: string, prefix = "已选择"): string {
   return `${prefix}：${WORKFLOWS[workflowKey][0]}\n勾选项为开启；SUSFS 与 NoMount 自动互斥。`;
 }
 function variantPrompt(scriptKey: string, prefix = "已选择"): string {
-  return `${prefix}：${SCRIPTS[scriptKey][0]}\n请选择${scriptKey === AOSP_WORKFLOW_KEY ? "构建" : "风驰"}版本：`;
+  return `${prefix}：${SCRIPTS[scriptKey][0]}\n请选择${AOSP_WORKFLOW_KEYS.has(scriptKey) ? "构建" : "风驰"}版本：`;
 }
 function supportsSelfConfig(workflowKey: string): boolean {
-  return ONEPLUS_15_WORKFLOW_KEYS.has(workflowKey) || workflowKey === AOSP_WORKFLOW_KEY;
+  return ONEPLUS_15_WORKFLOW_KEYS.has(workflowKey) || AOSP_WORKFLOW_KEYS.has(workflowKey);
 }
 function normalizeWorkflowKey(workflowKey: string | null | undefined): string | null {
   if (!workflowKey) return null;
@@ -383,10 +402,24 @@ async function setSession(env: Env, userId: number, data: Session) {
     "INSERT INTO sessions(telegram_user_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(telegram_user_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at"
   ).bind(userId, JSON.stringify(data), now()).run();
 }
+async function sendBuildMenu(env: Env, userId: number, chatId: number, session: Session, text: string, markup: unknown) {
+  const draft = { ...session, menuToken: crypto.randomUUID() };
+  await setSession(env, userId, draft);
+  const message = await sendMessage(env, chatId, text, markup);
+  await env.DB.prepare(
+    "UPDATE sessions SET data=json_set(data,'$.menuMessageId',?,'$.menuChatId',?),updated_at=? " +
+    "WHERE telegram_user_id=? AND json_extract(data,'$.menuToken')=?"
+  ).bind(message.message_id, chatId, now(), userId, draft.menuToken).run();
+}
 async function clearSession(env: Env, userId: number) {
   await env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=?").bind(userId).run();
 }
+async function clearSubmittedSession(env: Env, userId: number, session: Session) {
+  await env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=? AND data=?")
+    .bind(userId, JSON.stringify(session)).run();
+}
 async function activeBuild(env: Env, userId: number): Promise<boolean> {
+  if (isAdmin(env, userId)) return false;
   return Boolean(await env.DB.prepare("SELECT 1 AS yes FROM build_jobs WHERE active_user_id=? LIMIT 1").bind(userId).first());
 }
 async function isMember(env: Env, userId: number): Promise<boolean> {
@@ -447,6 +480,44 @@ async function serialForUser(env: Env, userId: number): Promise<string | null> {
   ).bind(userId).first();
   return row?.serial_value || null;
 }
+async function userForTarget(env: Env, target: string, allowUserId = false): Promise<number | null> {
+  if (allowUserId && /^[1-9][0-9]*$/.test(target)) {
+    const userId = Number(target);
+    return Number.isSafeInteger(userId) ? userId : null;
+  }
+  if (!SERIAL_RE.test(target)) return null;
+  const row: any = await env.DB.prepare(
+    "SELECT owner_user_id FROM serial_bindings WHERE serial_hash=? AND enabled=1"
+  ).bind(await digestSerial(env, target)).first();
+  return row?.owner_user_id == null ? null : Number(row.owner_user_id);
+}
+
+async function unbindScripts(env: Env, userId: number | null): Promise<number> {
+  const result = userId == null ? await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id IN (SELECT telegram_user_id FROM workflow_bindings)"),
+    env.DB.prepare("DELETE FROM workflow_bindings"),
+  ]) : await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=?").bind(userId),
+    env.DB.prepare("DELETE FROM workflow_bindings WHERE telegram_user_id=?").bind(userId),
+  ]);
+  return Number(result[1].meta.changes || 0);
+}
+
+async function setAospTestAccess(env: Env, userId: number, enabled: boolean) {
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO bot_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+    ).bind(`${AOSP_TEST_ACCESS_PREFIX}${userId}`, enabled ? "1" : "0"),
+    env.DB.prepare(enabled
+      ? "DELETE FROM sessions WHERE telegram_user_id=?"
+      : "DELETE FROM sessions WHERE telegram_user_id=? AND (json_extract(data,'$.workflow')=? OR json_extract(data,'$.selectedScript')=?)"
+    ).bind(...(enabled ? [userId] : [userId, AOSP_TEST_WORKFLOW_KEY, AOSP_TEST_WORKFLOW_KEY])),
+    env.DB.prepare(enabled
+      ? "DELETE FROM workflow_bindings WHERE telegram_user_id=?"
+      : "DELETE FROM workflow_bindings WHERE telegram_user_id=? AND workflow_key=?"
+    ).bind(...(enabled ? [userId] : [userId, AOSP_TEST_WORKFLOW_KEY])),
+  ]);
+}
 async function claimSerial(env: Env, serial: string, userId: number): Promise<boolean> {
   const record = await serialRecord(env, serial);
   if (!record) return false;
@@ -502,6 +573,7 @@ async function revokeSerial(env: Env, serial: string): Promise<RevokeResult> {
     statements.push(env.DB.prepare("DELETE FROM workflow_bindings WHERE telegram_user_id=?").bind(row.owner_user_id));
     statements.push(env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=?").bind(row.owner_user_id));
     statements.push(env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(row.owner_user_id));
+    statements.push(env.DB.prepare("DELETE FROM bot_state WHERE key=?").bind(`${AOSP_TEST_ACCESS_PREFIX}${row.owner_user_id}`));
   }
   await env.DB.batch(statements);
   if (row?.owner_user_id == null) return { removed: true };
@@ -648,7 +720,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
   for (const keys of BOOL_OPTION_ROWS) {
     const row = keys
       .filter(key => key !== "self_config" || showSelf)
-      .filter(key => !AOSP_BOOL_OPTIONS.has(key) || workflowKey === AOSP_WORKFLOW_KEY)
+      .filter(key => !AOSP_BOOL_OPTIONS.has(key) || AOSP_WORKFLOW_KEYS.has(workflowKey))
       .map(key => ({
         text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
         callback_data: `set:${key}:${options[key] === "true" ? "false" : "true"}`,
@@ -659,7 +731,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
   const droidLabel: Record<string, string> = { false: "关闭", standard: "标准", extend: "扩展" };
   const nextValue = (values: string[], current: string) => values[(values.indexOf(current) + 1) % values.length];
   rows.push([{ text: `KernelSU：${KSU_LABELS[options.ksu_type]}`, callback_data: `set:ksu_type:${nextValue(KSU_VALUES, options.ksu_type)}` }]);
-  if (workflowKey === AOSP_WORKFLOW_KEY) rows.push([{
+  if (AOSP_WORKFLOW_KEYS.has(workflowKey)) rows.push([{
     text: `默认 ZRAM：${ZRAM_LABELS[options.zram_default_algorithm] || ZRAM_LABELS.default}`,
     callback_data: `set:zram_default_algorithm:${nextValue(ZRAM_VALUES, options.zram_default_algorithm || "default")}`,
   }], [{
@@ -726,7 +798,7 @@ function optimisticOptionsMarkup(query: any, data: string): any | null {
   return copy;
 }
 
-async function persistQuickOption(env: Env, userId: number, data: string, admin: boolean): Promise<boolean> {
+async function persistQuickOption(env: Env, userId: number, data: string, admin: boolean, messageId: number, chatId: number): Promise<boolean> {
   const [, key, value] = data.split(":", 3);
   if (!key || value == null) return false;
   let allowedValues: string[];
@@ -747,15 +819,21 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   const jsonArgs = fields.map(() => "?, ?").join(", ");
   const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.${name}`, next]);
   params.push(now(), userId);
-  const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp')"
-    : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow')='669aosp'" : "";
+  const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp','669aosp-test')"
+    : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow') IN ('669aosp','669aosp-test')" : "";
+  const accessGuard = admin ? "" : " AND (json_extract(data,'$.workflow')!='669aosp-test' OR EXISTS (SELECT 1 FROM bot_state WHERE key=? AND value='1'))";
+  if (!admin) params.push(`${AOSP_TEST_ACCESS_PREFIX}${userId}`);
+  const menuGuard = " AND (json_extract(data,'$.menuMessageId') IS NULL OR (json_extract(data,'$.menuMessageId')=? AND json_extract(data,'$.menuChatId')=?))";
+  params.push(messageId, Number(chatId));
   const result: any = await env.DB.prepare(
-    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${workflowGuard}`
+    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${workflowGuard}${accessGuard}${menuGuard}`
   ).bind(...params).run();
   return Number(result.meta?.changes || 0) > 0;
 }
-function workflowMarkup(includeOwnerNoMount = false) {
-  const rows = Object.entries(SCRIPTS).map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
+async function workflowMarkup(env: Env, userId: number, includeOwnerNoMount = false) {
+  const showTest = await canUseScript(env, userId, AOSP_TEST_WORKFLOW_KEY);
+  const rows = Object.entries(SCRIPTS).filter(([key]) => key !== AOSP_TEST_WORKFLOW_KEY || showTest)
+    .map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
   if (includeOwnerNoMount) rows.push([{ text: "独立 NoMount 模块（LKM）", callback_data: "owner_nomount" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
   return { inline_keyboard: rows };
@@ -868,7 +946,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     const session: Session = { serial, options };
     if (bound) {
-      if (!SCRIPTS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
+      if (!SCRIPTS[bound] || !(await canUseScript(env, userId, bound))) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
       const variants = SCRIPTS[bound][1];
       const workflowKeys = variants ? Object.values(variants).map(([, key]) => key) : [bound];
       for (const key of workflowKeys) {
@@ -881,13 +959,11 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
         session.workflow = bound;
         applyWorkflowDefaults(bound, options);
       }
-      await setSession(env, userId, session);
-      if (variants) await sendMessage(env, chatId, variantPrompt(bound, "已绑定"), variantMarkup(bound, isAdmin(env, userId)));
-      else await sendMessage(env, chatId, optionsPrompt(bound, "已绑定"), optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound), bound));
+      if (variants) await sendBuildMenu(env, userId, chatId, session, variantPrompt(bound, "已绑定"), variantMarkup(bound, isAdmin(env, userId)));
+      else await sendBuildMenu(env, userId, chatId, session, optionsPrompt(bound, "已绑定"), optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(bound), bound));
       return;
     }
-    await setSession(env, userId, session);
-    await sendMessage(env, chatId, isAdmin(env, userId) ? "请选择本次构建脚本：" : "首次构建，请选择要绑定的构建脚本：", workflowMarkup());
+    await sendBuildMenu(env, userId, chatId, session, isAdmin(env, userId) ? "请选择本次构建脚本：" : "首次构建，请选择要绑定的构建脚本：", await workflowMarkup(env, userId));
     return;
   }
   if (command === "buildfor") {
@@ -898,8 +974,35 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const serial = args[0] || "";
     if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/buildfor 序列号"); return; }
     if (!(await serialRecord(env, serial))) { await sendMessage(env, chatId, "该序列号不在启用的白名单中。"); return; }
-    await setSession(env, userId, { serial, options: await loadBuildPreferences(env, userId, true), ownerDirectedBuild: true, deliveryChatId: userId });
-    await sendMessage(env, chatId, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择内核脚本，或构建独立 NoMount 模块：`, workflowMarkup(true)); return;
+    const session = { serial, options: await loadBuildPreferences(env, userId, true), ownerDirectedBuild: true, deliveryChatId: userId };
+    await sendBuildMenu(env, userId, chatId, session, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择内核脚本，或构建独立 NoMount 模块：`, await workflowMarkup(env, userId, true)); return;
+  }
+  if (command === "unbindscript" || command === "aosptest") {
+    if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
+    if (message.chat.type !== "private" || Number(chatId) !== Number(userId)) {
+      await sendMessage(env, chatId, "请私聊机器人使用管理员授权命令。"); return;
+    }
+    const target = args[0] || "";
+    if (command === "unbindscript") {
+      if (args.length !== 1) { await sendMessage(env, chatId, "用法：/unbindscript 序列号 或 /unbindscript all"); return; }
+      const all = target.toLowerCase() === "all";
+      const owner = all ? null : await userForTarget(env, target);
+      if (!all && owner == null) { await sendMessage(env, chatId, "该序列号未绑定启用中的 Telegram 账号。"); return; }
+      const count = await unbindScripts(env, owner);
+      await sendMessage(env, chatId, `已解除${all ? "全部用户" : `用户 ${owner}`}的脚本绑定（${count} 条）。序列号、构建选项、额度和进行中的构建不变；下次 /build 需重新选择并绑定脚本。`);
+      return;
+    }
+    const mode = (args[1] || "on").toLowerCase();
+    if (!target || args.length > 2 || !["on", "off"].includes(mode)) {
+      await sendMessage(env, chatId, "用法：/aosptest 序列号或Telegram用户ID [on|off]；默认 on，授权后清除原脚本绑定。"); return;
+    }
+    const owner = await userForTarget(env, target, true);
+    if (owner == null) { await sendMessage(env, chatId, "请输入有效的 Telegram 用户 ID，或已绑定启用账号的序列号。"); return; }
+    await setAospTestAccess(env, owner, mode === "on");
+    await sendMessage(env, chatId, mode === "on"
+      ? `已向用户 ${owner} 开放 6.12.69·AOSP（风驰测试），并解除原脚本绑定。该用户仍需通过序列号、群组验证，在 /build 中选择并绑定后才能构建。`
+      : `已撤销用户 ${owner} 的 AOSP 测试授权，并清除其测试脚本绑定；其他脚本绑定和进行中的构建不变。`);
+    return;
   }
   if (command === "allow") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
@@ -996,6 +1099,9 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await editMessage(env, chatId, messageId, "最终授权检查失败，未触发构建。"); return;
   }
+  if (!(await canUseScript(env, userId, workflowKey))) {
+    await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
+  }
   const boundScript = WORKFLOW_SCRIPTS[workflowKey] || workflowKey;
   if (!isAdmin(env, userId) && (await workflowForUser(env, userId)) !== boundScript) {
     await editMessage(env, chatId, messageId, "构建脚本绑定复核失败，请重新使用 /build。"); return;
@@ -1006,40 +1112,41 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const selectedOptions = { ...(session.options || defaults()) };
   const options = { ...selectedOptions };
   delete options.zarm_tool;
-  if (workflowKey !== AOSP_WORKFLOW_KEY) for (const key of AOSP_OPTIONS) delete options[key];
+  if (!AOSP_WORKFLOW_KEYS.has(workflowKey)) for (const key of AOSP_OPTIONS) delete options[key];
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
-  const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+  const requestId = (await digestSerial(env, `kernel:${userId}:${chatId}:${messageId}`)).slice(0, 16);
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
   if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "服务暂不可用，请稍后重试。"); return; }
-  const stored = { ...inputs, build_kind: "kernel", github_repo: env.GITHUB_REPO };
+  const ref = workflowKey === AOSP_TEST_WORKFLOW_KEY ? AOSP_TEST_REF : env.GITHUB_REF;
+  const stored = { ...inputs, build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref };
   const created = now();
   try {
     await env.DB.prepare(
       "INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) " +
       "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
-    ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(stored), created, created).run();
+    ).bind(requestId, userId, isAdmin(env, userId) ? null : userId, Number(session.deliveryChatId || userId), workflowFile, JSON.stringify(stored), created, created).run();
   } catch { await editMessage(env, chatId, messageId, "这次构建已登记或已有构建正在进行，请勿重复提交。"); return; }
   let response: Response;
   try {
     response = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`, {
       method: "POST", headers: ghHeaders(env),
-      body: JSON.stringify({ ref: env.GITHUB_REF, inputs }),
+      body: JSON.stringify({ ref, inputs }),
     });
   } catch {
-    await clearSession(env, userId);
+    await clearSubmittedSession(env, userId, session);
     await editMessage(env, chatId, messageId, "提交处理中，请勿重复提交。"); return;
   }
   if (response.status !== 204) {
     console.error("Kernel dispatch rejected", response.status);
     await finishJob(env, requestId, "failed");
-    await clearSession(env, userId); await editMessage(env, chatId, messageId, "提交失败，请稍后重试。"); return;
+    await clearSubmittedSession(env, userId, session); await editMessage(env, chatId, messageId, "提交失败，请稍后重试。"); return;
   }
   try { await saveBuildPreferences(env, userId, selectedOptions, isAdmin(env, userId)); }
   catch (error) { console.error("save build preferences failed", userId, String(error)); }
-  await clearSession(env, userId); await editMessage(env, chatId, messageId, "已提交，完成后自动发包。");
+  await clearSubmittedSession(env, userId, session); await editMessage(env, chatId, messageId, "已提交，完成后自动发包。");
 }
 
 async function buildQuotaMessage(env: Env, userId: number): Promise<string | null> {
@@ -1115,13 +1222,13 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
   const quotaMessage = await buildQuotaMessage(env, userId);
   if (quotaMessage) { await reject(quotaMessage); return; }
   const inputs = await nomountInputs(serial, requestId);
-  const stored = { ...inputs, build_kind: "nomount-lkm", github_repo: env.LKM_GITHUB_REPO };
+  const stored = { ...inputs, build_kind: "nomount-lkm", github_repo: env.LKM_GITHUB_REPO, github_ref: env.LKM_GITHUB_REF || "main" };
   const created = now();
   try {
     await env.DB.prepare(
       "INSERT INTO build_jobs(request_id,telegram_user_id,active_user_id,chat_id,workflow_file,inputs,github_run_id,status,succeeded_at,created_at,updated_at) " +
       "VALUES(?,?,?,?,?,?,NULL,'submitted',NULL,?,?)"
-    ).bind(requestId, userId, userId, Number(session.deliveryChatId || userId), "lkm.yml", JSON.stringify(stored), created, created).run();
+    ).bind(requestId, userId, isAdmin(env, userId) ? null : userId, Number(session.deliveryChatId || userId), "lkm.yml", JSON.stringify(stored), created, created).run();
   } catch {
     await reject("这次构建已登记或已有构建正在进行，请勿重复提交。"); return;
   }
@@ -1132,15 +1239,15 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
       body: JSON.stringify({ ref: env.LKM_GITHUB_REF || "main", inputs }),
     });
   } catch {
-    await clearSession(env, userId);
+    await clearSubmittedSession(env, userId, session);
     await reject("提交处理中，请勿重复提交。"); return;
   }
   if (response.status !== 204) {
     console.error("NoMount dispatch rejected", response.status);
     await finishJob(env, requestId, "failed");
-    await clearSession(env, userId); await reject("提交失败，请稍后重试。"); return;
+    await clearSubmittedSession(env, userId, session); await reject("提交失败，请稍后重试。"); return;
   }
-  await clearSession(env, userId);
+  await clearSubmittedSession(env, userId, session);
   await reject("已提交，完成后自动发包。");
 }
 
@@ -1148,11 +1255,18 @@ async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   await answerCallback(env, query.id);
   const data = query.data || "";
+  if (/^(?:kernel|variant|bind):/.test(data) && !(await canUseScript(env, userId, data.split(":")[1]))) {
+    await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
+  }
   if (data.startsWith("nomount:")) {
     await dispatchNoMountBuild(env, query, await getSession(env, userId), data.slice(8)); return;
   }
   if (data === "owner_nomount") {
-    await beginOwnerNoMountBuild(env, query, await getSession(env, userId)); return;
+    const session = await getSession(env, userId);
+    if (session.menuMessageId != null && (session.menuMessageId !== messageId || session.menuChatId !== Number(chatId))) {
+      await editMessage(env, chatId, messageId, "该菜单已失效，请使用最新的构建菜单。"); return;
+    }
+    await beginOwnerNoMountBuild(env, query, session); return;
   }
   if (data.startsWith("set:")) {
     const [, key] = data.split(":", 3);
@@ -1166,7 +1280,7 @@ async function handleCallback(env: Env, update: any) {
       return;
     }
     await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optimistic });
-    if (!(await persistQuickOption(env, userId, data, isAdmin(env, userId)))) {
+    if (!(await persistQuickOption(env, userId, data, isAdmin(env, userId), messageId, chatId))) {
       await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。");
     }
     return;
@@ -1179,7 +1293,13 @@ async function handleCallback(env: Env, update: any) {
     return;
   }
   const session = await getSession(env, userId);
+  if (session.menuMessageId != null && (session.menuMessageId !== messageId || session.menuChatId !== Number(chatId))) {
+    await editMessage(env, chatId, messageId, "该菜单已失效，请使用最新的构建菜单。"); return;
+  }
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
+  if (!(await canUseScript(env, userId, session.workflow || session.selectedScript || ""))) {
+    await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
+  }
   if (data === "back:scripts") {
     delete session.workflow; delete session.selectedScript; session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     if (!isAdmin(env, userId)) {
@@ -1194,7 +1314,7 @@ async function handleCallback(env: Env, update: any) {
     const ownerBuild = session.ownerDirectedBuild === true && isAdmin(env, userId) && Number(chatId) === Number(userId);
     await editMessage(env, chatId, messageId,
       ownerBuild ? "请选择内核脚本，或构建独立 NoMount 模块：" : "请选择本次构建脚本：",
-      workflowMarkup(ownerBuild));
+      await workflowMarkup(env, userId, ownerBuild));
     return;
   }
   if (data === "back:variant") {
@@ -1262,7 +1382,7 @@ async function handleCallback(env: Env, update: any) {
     if (!boundScript || selectedScript !== boundScript) {
       delete session.workflow;
       await setSession(env, userId, session);
-      await editMessage(env, chatId, messageId, "尚未绑定脚本，请先选择机型并点击“绑定此脚本”。", workflowMarkup());
+      await editMessage(env, chatId, messageId, "尚未绑定脚本，请先选择机型并点击“绑定此脚本”。", await workflowMarkup(env, userId));
       return;
     }
   }
@@ -1271,7 +1391,7 @@ async function handleCallback(env: Env, update: any) {
   delete options.zarm_tool;
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
-    if (AOSP_BOOL_OPTIONS.has(key) && session.workflow !== AOSP_WORKFLOW_KEY) return;
+    if (AOSP_BOOL_OPTIONS.has(key) && !AOSP_WORKFLOW_KEYS.has(session.workflow || "")) return;
     if (key === "self_config" && !isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "该配置仅限所有者使用。"); return; }
     const value = options[key] === "true" ? "false" : "true";
     options[key] = value;
@@ -1279,7 +1399,7 @@ async function handleCallback(env: Env, update: any) {
     if (value === "true" && key === "nomount_enable") options.susfs_enable = "false";
   } else if (data.startsWith("cycle:")) {
     const key = data.slice(6);
-    if (AOSP_OPTIONS.has(key) && session.workflow !== AOSP_WORKFLOW_KEY) return;
+    if (AOSP_OPTIONS.has(key) && !AOSP_WORKFLOW_KEYS.has(session.workflow || "")) return;
     const choices = key === "ksu_type" ? KSU_VALUES : key === "bbr_enable" ? BBR_VALUES : key === "droidspaces_enable" ? DROID_VALUES : key === "zram_default_algorithm" ? ZRAM_VALUES : key === "zram_size_gib" ? ZRAM_SIZE_VALUES : null;
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
   } else if (data === "dispatch") { await dispatchBuild(env, query, session); return; }
@@ -1426,7 +1546,8 @@ async function processJob(env: Env, job: any) {
   if (!runId) {
     const response = await fetch(`${root}/actions/workflows/${job.workflow_file}/runs?event=workflow_dispatch&per_page=50`, { headers });
     if (!response.ok) throw new Error(`runs ${response.status}`);
-    const runs: any[] = (await response.json() as any).workflow_runs || [];
+    const runs: any[] = ((await response.json() as any).workflow_runs || [])
+      .filter((candidate: any) => !inputs.github_ref || candidate.head_branch === inputs.github_ref);
     run = runs.find(r => String(r.display_title || "").includes(job.request_id));
     if (!run && !lkm) {
       for (const candidate of runs.filter(r => Date.parse(r.created_at) / 1000 >= job.created_at - 120)) {
@@ -1592,7 +1713,7 @@ export default {
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospTestAccess: "admin-or-grant" });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
