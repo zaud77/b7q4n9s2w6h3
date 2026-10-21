@@ -15,6 +15,9 @@ type Env = {
   LKM_GITHUB_REPO: string;
   LKM_GITHUB_REF: string;
   LKM_GITHUB_TOKEN?: string;
+  PRIVATE_BUILD_TOKEN?: string;
+  PRIVATE_KERNEL_REPOSITORY?: string;
+  PRIVATE_LKM_REPOSITORY?: string;
   BUILD_COOLDOWN_SECONDS: string;
   DAILY_BUILD_LIMIT: string;
 };
@@ -1555,10 +1558,20 @@ async function downloadLatestKowSuManager(env: Env): Promise<{ name: string; byt
   return { name: String(asset.name), bytes };
 }
 
-async function downloadNoMountBuildAttestation(url: string, headers: Record<string, string>) {
-  const response = await fetch(url, { headers, redirect: "follow" });
-  if (!response.ok) throw new Error(`NoMount binding artifact download ${response.status}`);
-  const files = unzipSync(new Uint8Array(await response.arrayBuffer()));
+async function downloadBuildArtifact(artifact: any, headers: Record<string, string>): Promise<Uint8Array> {
+  const response = await fetch(artifact.archive_download_url, { headers, redirect: "follow" });
+  if (!response.ok) throw new Error(`Build artifact download ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (artifact.digest) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer as ArrayBuffer));
+    if ("sha256:" + Array.from(digest).map(value => value.toString(16).padStart(2, "0")).join("") !== artifact.digest)
+      throw new Error("Private build artifact checksum mismatch");
+  }
+  return bytes;
+}
+
+async function downloadNoMountBuildAttestation(artifact: any, headers: Record<string, string>) {
+  const files = unzipSync(await downloadBuildArtifact(artifact, headers));
   const kernelModule = files["nomount.ko"];
   const buildInfoBytes = files["build-info.json"];
   const checksumsBytes = files["sha256.txt"];
@@ -1573,6 +1586,53 @@ async function downloadNoMountBuildAttestation(url: string, headers: Record<stri
   const actual = Array.from(digest).map(value => value.toString(16).padStart(2, "0")).join("");
   if (!checksum || checksum !== actual) throw new Error("NoMount binding artifact checksum mismatch");
   return { buildInfo, kernelModule };
+}
+
+async function buildArtifactCatalog(env: Env, repo: string, run: any, runId: number, lkm: boolean) {
+  const privateRepo = lkm ? env.PRIVATE_LKM_REPOSITORY : env.PRIVATE_KERNEL_REPOSITORY;
+  if (env.PRIVATE_BUILD_TOKEN && privateRepo) {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(privateRepo) ||
+        !Number.isSafeInteger(run.repository?.id) || run.repository.id <= 0 ||
+        (run.repository.full_name && run.repository.full_name !== repo))
+      throw new Error("Private build artifact repository binding is invalid");
+    const root = `https://api.github.com/repos/${privateRepo}`;
+    const apiHeaders = { authorization: `Bearer ${env.PRIVATE_BUILD_TOKEN}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "kernel-build-bot" };
+    const repository = await fetch(root, { headers: apiHeaders });
+    if (!repository.ok || (await repository.json() as any).private !== true)
+      throw new Error("Private build artifact storage is unavailable");
+    const artifacts = new Map<string, any>();
+    const attempts = Number(run.run_attempt || 1);
+    if (!Number.isSafeInteger(attempts) || attempts < 1) throw new Error("Private build artifact attempt is invalid");
+    for (let attempt = attempts; attempt >= 1; attempt--) {
+      const tag = `build-diagnostics-${run.repository.id}-${runId}-${attempt}`;
+      const response = await fetch(`${root}/releases/tags/${tag}`, { headers: apiHeaders });
+      if (response.status === 404) continue;
+      if (!response.ok) throw new Error(`Private build artifact catalog ${response.status}`);
+      const release: any = await response.json();
+      const identity = `Encrypted build diagnostics v1\nOrigin: ${repo}\nRun: ${runId}\nAttempt: ${attempt}\n`;
+      if (release.tag_name !== tag || !String(release.body || "").startsWith(identity) || !Number.isSafeInteger(release.id))
+        throw new Error("Private build artifact release does not match the run");
+      for (let page = 1; ; page++) {
+        const assetsResponse = await fetch(`${root}/releases/${release.id}/assets?per_page=100&page=${page}`, { headers: apiHeaders });
+        if (!assetsResponse.ok) throw new Error(`Private build artifact list ${assetsResponse.status}`);
+        const assets: any[] = await assetsResponse.json();
+        for (const asset of assets) {
+          const name = String(asset.label || "").startsWith("Build artifact: ") ? String(asset.label).slice(16) : "";
+          if (!name || asset.name !== `artifact-${name}.zip` || artifacts.has(name)) continue;
+          if (!Number.isSafeInteger(asset.id) || asset.state !== "uploaded" || !/^sha256:[a-f0-9]{64}$/.test(asset.digest || ""))
+            throw new Error("Private build artifact metadata is invalid");
+          artifacts.set(name, { name, digest: asset.digest, expired: false,
+            archive_download_url: `${root}/releases/assets/${asset.id}` });
+        }
+        if (assets.length < 100) break;
+      }
+    }
+    if (artifacts.size) return { artifacts: [...artifacts.values()], headers: { ...apiHeaders, accept: "application/octet-stream" } };
+  }
+  const headers = ghHeaders(env, lkm);
+  const response = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${runId}/artifacts`, { headers });
+  if (!response.ok) throw new Error(`artifacts ${response.status}`);
+  return { artifacts: ((await response.json() as any).artifacts || []) as any[], headers };
 }
 
 async function processJob(env: Env, job: any) {
@@ -1612,20 +1672,19 @@ async function processJob(env: Env, job: any) {
     "WHERE request_id=? AND (status IN ('running','delivery_pending') OR (status='delivering' AND updated_at<=?))"
   ).bind(now(), now(), job.request_id, now() - 300).run();
   if (!Number(claimed.meta.changes || 0)) return;
-  const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers });
-  if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
+  const catalog = await buildArtifactCatalog(env, repo, run, runId, lkm);
+  const artifacts = catalog.artifacts;
+  const artifactHeaders = catalog.headers;
   if (lkm) {
     const kernelSeries = String(inputs.kernel_series || "6.12");
     if (!Object.hasOwn(NOMOUNT_KERNELS, kernelSeries)) throw new Error("Unknown NoMount build target");
     const artifact = artifacts.find(a => a.name === "nomount-suite-lkm" && !a.expired);
     if (!artifact) throw new Error("NoMount module artifact missing");
-    const download = await fetch(artifact.archive_download_url, { headers, redirect: "follow" });
-    if (!download.ok) throw new Error(`NoMount artifact download ${download.status}`);
-    const module = unwrapArtifact(new Uint8Array(await download.arrayBuffer()), NOMOUNT_PACKAGE_RE);
+    const module = unwrapArtifact(await downloadBuildArtifact(artifact, artifactHeaders), NOMOUNT_PACKAGE_RE);
     if (!module) throw new Error("Expected one installable NoMount module ZIP");
     const bindingArtifact = artifacts.find(a => a.name === NOMOUNT_KERNELS[kernelSeries] && !a.expired);
     const attestation = bindingArtifact
-      ? await downloadNoMountBuildAttestation(bindingArtifact.archive_download_url, headers)
+      ? await downloadNoMountBuildAttestation(bindingArtifact, artifactHeaders)
       : null;
     validateNoMountPackage(module.bytes, inputs.device_serial_sha256, attestation, kernelSeries);
     const serial = String(inputs.device_serial || await serialForUser(env, Number(job.telegram_user_id)) || "");
@@ -1642,8 +1701,7 @@ async function processJob(env: Env, job: any) {
   if (String(inputs.nomount_enable).toLowerCase() === "true") packages.push([/^NoMount(?:-Suite)?(?:[-_].*)?(?:\.zip)?$/i, /^NoMount(?:-Suite)?(?:[-_].*)?\.zip$/i, isAdmin(env, job.chat_id) ? "NoMount 模块已随本次构建生成。" : undefined, false, true]);
   for (const [artifactPattern, filePattern, caption, unwrap, preserveName] of packages) {
     const artifact = artifacts.find(a => artifactPattern.test(a.name || "") && !a.expired); if (!artifact) return;
-    const download = await fetch(artifact.archive_download_url, { headers: ghHeaders(env), redirect: "follow" }); if (!download.ok) throw new Error(`artifact download ${download.status}`);
-    const outer = new Uint8Array(await download.arrayBuffer()); const unwrapped = unwrap ? unwrapArtifact(outer, filePattern) : null;
+    const outer = await downloadBuildArtifact(artifact, artifactHeaders); const unwrapped = unwrap ? unwrapArtifact(outer, filePattern) : null;
     const originalName = String(artifact.name || "NoMount.zip");
     const filename = preserveName
       ? (originalName.toLowerCase().endsWith(".zip") ? originalName : `${originalName}.zip`)
@@ -1760,7 +1818,7 @@ export default {
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospTestAccess: "admin-or-grant" });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospTestAccess: "admin-or-grant" });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;

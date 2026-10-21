@@ -11,7 +11,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, handleCallback, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions };";
+  + "\nexport { handleCommand, handleCallback, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -177,6 +177,31 @@ async function deliveryFixture(t, options = {}) {
     throw new Error("Unexpected fixture request");
   };
   return { env, state, job, payload, outer, name };
+}
+
+function privateDelivery(env, state, outer, kernelArtifactBytes, options = {}) {
+  const root = "https://api.github.com/repos/private/lkm";
+  env.PRIVATE_BUILD_TOKEN = "private-build-fixture-token";
+  env.PRIVATE_LKM_REPOSITORY = "private/lkm";
+  const artifact = (name, id, bytes) => ({ id, name: `artifact-${name}.zip`, label: `Build artifact: ${name}`,
+    state: "uploaded", digest: "sha256:" + createHash("sha256").update(bytes).digest("hex") });
+  state.githubResponse = async (url, request) => {
+    if (url.endsWith("/actions/runs/99")) return Response.json({ id: 99, status: "completed", conclusion: "success",
+      run_attempt: 2, repository: { id: 123, full_name: env.LKM_GITHUB_REPO } });
+    assert.equal(request.headers.authorization, "Bearer private-build-fixture-token");
+    if (url === root) return Response.json({ private: options.publicRepository !== true });
+    const match = url.match(/\/releases\/tags\/(build-diagnostics-123-99-([12]))$/);
+    if (match) return Response.json({ id: Number(match[2]), tag_name: match[1],
+      body: `Encrypted build diagnostics v1\nOrigin: ${options.origin || env.LKM_GITHUB_REPO}\nRun: 99\nAttempt: ${match[2]}\n` });
+    if (url === `${root}/releases/2/assets?per_page=100&page=1`)
+      return Response.json([artifact("nomount-suite-lkm", 201, outer),
+        { id: 299, name: "run-99-suite-0-attempt-2.zip", state: "uploaded" }]);
+    if (url === `${root}/releases/1/assets?per_page=100&page=1`)
+      return Response.json(kernelArtifactBytes ? [artifact("nomount-android17-6.18-kernel", 202, kernelArtifactBytes)] : []);
+    if (url === `${root}/releases/assets/201`) return new Response(options.corrupt ? strToU8("wrong") : outer);
+    if (url === `${root}/releases/assets/202`) return new Response(kernelArtifactBytes);
+    throw new Error("Unexpected private artifact request");
+  };
 }
 
 test("bound users get a private, serial-free confirmation", async t => {
@@ -393,11 +418,39 @@ test("6.18 delivery requires the selected target in both package and run attesta
   const checksum = createHash("sha256").update(kernelModule).digest("hex");
   const kernelArtifactBytes = zipSync({ "nomount.ko": kernelModule, "build-info.json": strToU8(JSON.stringify(info)),
     "sha256.txt": strToU8(`${checksum}  artifacts/nomount.ko\n`) });
-  const { env, state, job } = await deliveryFixture(t, { kernelSeries: "6.18", packageOverride: payload, kernelArtifactBytes });
-  await worker.processJob(env, job);
-  const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
-  assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-6.18-${serial}.zip`);
-  assert.equal(job.status, "sent");
+  for (const usePrivate of [false, true]) {
+    const { env, state, job, outer } = await deliveryFixture(t, { kernelSeries: "6.18", packageOverride: payload, kernelArtifactBytes });
+    if (usePrivate) privateDelivery(env, state, outer, kernelArtifactBytes);
+    await worker.processJob(env, job);
+    const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
+    assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-6.18-${serial}.zip`);
+    assert.deepEqual(new Uint8Array(await sent.body.get("document").arrayBuffer()), payload);
+    assert.equal(job.status, "sent");
+    if (usePrivate) {
+      assert.equal(state.calls.some(call => call.url.endsWith("/actions/runs/99/artifacts")), false);
+      assert.ok(state.calls.some(call => call.url.includes("build-diagnostics-123-99-1")));
+      assertPrivateMessages(state);
+    }
+  }
+});
+
+test("private artifacts fail closed on public storage, wrong origin or damaged downloads", async t => {
+  for (const options of [{ publicRepository: true }, { origin: "other/builds" }, { corrupt: true }]) {
+    const { env, state, job, outer } = await deliveryFixture(t);
+    privateDelivery(env, state, outer, null, options);
+    await assert.rejects(() => worker.processJob(env, job), /Private build artifact/);
+    assert.equal(state.calls.some(call => call.url.endsWith("/sendDocument")), false);
+    assert.equal(state.calls.some(call => call.url.endsWith("/actions/runs/99/artifacts")), false);
+  }
+});
+
+test("private catalog never delivers encrypted diagnostic attachments", async t => {
+  const { env, state, outer } = await deliveryFixture(t);
+  privateDelivery(env, state, outer, null);
+  const catalog = await worker.buildArtifactCatalog(env, env.LKM_GITHUB_REPO,
+    { run_attempt: 2, repository: { id: 123 } }, 99, true);
+  assert.deepEqual(catalog.artifacts.map(item => item.name), ["nomount-suite-lkm"]);
+  assert.equal(catalog.headers.accept, "application/octet-stream");
 });
 
 test("embedded package metadata is delivered without a separate binding file", async t => {
@@ -995,6 +1048,7 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(body.nomountRepository, "zaud77/m8v3p6r9x2k4");
   assert.equal(body.kernelBuildsReady, true);
   assert.equal(body.nomountBuildsReady, true);
+  assert.equal(body.privateBuildsReady, false);
   assert.deepEqual(body.nomountKernelSeries, ["6.12", "6.18"]);
   assert.equal(body.dailyBuildLimit, 2);
   assert.equal(body.quotaIncludesAdmins, false);
@@ -1005,4 +1059,9 @@ test("health reports deployed repository bindings without exposing credentials",
   const revision = source.match(/const COMMAND_MENU_REVISION = "([^"]+)";/)[1];
   assert.ok(deploy.includes(`and .commandMenus == "${revision}"`));
   assert.ok(deploy.includes('and .nomountKernelSeries == ["6.12", "6.18"]'));
+  Object.assign(env, { PRIVATE_BUILD_TOKEN: "private-fixture-token", PRIVATE_KERNEL_REPOSITORY: "private/kernel", PRIVATE_LKM_REPOSITORY: "private/lkm" });
+  const configured = await (await worker.default.fetch(new Request("https://fixture.invalid/health"), env, {})).json();
+  assert.equal(configured.privateBuildsReady, true);
+  assert.equal(JSON.stringify(configured).includes("private/"), false);
+  assert.equal(JSON.stringify(configured).includes("private-fixture-token"), false);
 });
