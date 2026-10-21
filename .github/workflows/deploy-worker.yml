@@ -31,6 +31,7 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check:worker
+      - run: pnpm run test:worker
       - run: pnpm run deploy:worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -43,7 +44,8 @@ jobs:
               and .quotaMigration == "migration:successful-build-quota-v1"
               and .chatHistoryMigration == "migration:private-chat-clear-v1"
               and .buildPreferencesMigration == "migration:user-build-preferences-v1"
-              and .commandMenus == "commands:scoped-menus-v6"
+              and .commandMenus == "commands:scoped-menus-v7"
+              and .nomountKernelSeries == ["6.12", "6.18"]
               and .adminParallelBuilds == true
               and .aospTestAccess == "admin-or-grant"
               and .kernelBuildsReady == true

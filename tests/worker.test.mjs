@@ -1001,4 +1001,8 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(state.jobs.length, 0);
   assert.equal(state.calls.length, 0);
   assert.equal(JSON.stringify(body).includes("fixture-token"), false);
+  const deploy = await readFile(new URL("../.github/workflows/deploy-worker.yml", import.meta.url), "utf8");
+  const revision = source.match(/const COMMAND_MENU_REVISION = "([^"]+)";/)[1];
+  assert.ok(deploy.includes(`and .commandMenus == "${revision}"`));
+  assert.ok(deploy.includes('and .nomountKernelSeries == ["6.12", "6.18"]'));
 });
