@@ -155,9 +155,9 @@ function assertPrivateMessages(state) {
 }
 
 async function deliveryFixture(t, options = {}) {
-  const { filename, digestOnly, packageOverride, kernelArtifactBytes, conclusion = "success", ...overrides } = options;
+  const { filename, digestOnly, packageOverride, kernelArtifactBytes, kernelSeries = "6.12", conclusion = "success", ...overrides } = options;
   const { env, state } = await fixture(t, overrides);
-  const inputs = await worker.nomountInputs(serial, requestId);
+  const inputs = await worker.nomountInputs(serial, requestId, kernelSeries);
   if (digestOnly) delete inputs.device_serial;
   const payload = packageOverride || packageBytes(inputs.device_serial_sha256);
   const name = filename || `NoMount-Suite-v1.80-LKM-${serial}.zip`;
@@ -170,7 +170,7 @@ async function deliveryFixture(t, options = {}) {
     if (url.endsWith("/runs/99")) return Response.json({ status: "completed", conclusion });
     if (url.endsWith("/artifacts")) return Response.json({ artifacts: [
       { name: "nomount-suite-lkm", archive_download_url: "https://api.github.com/download/fixture" },
-      ...(kernelArtifactBytes ? [{ name: "nomount-android16-6.12-kernel", archive_download_url: "https://api.github.com/download/kernel-fixture" }] : []),
+      ...(kernelArtifactBytes ? [{ name: kernelSeries === "6.18" ? "nomount-android17-6.18-kernel" : "nomount-android16-6.12-kernel", archive_download_url: "https://api.github.com/download/kernel-fixture" }] : []),
     ] });
     if (url.endsWith("/download/fixture")) return new Response(outer);
     if (url.endsWith("/download/kernel-fixture")) return new Response(kernelArtifactBytes);
@@ -186,11 +186,31 @@ test("bound users get a private, serial-free confirmation", async t => {
   assert.equal(saved.serial, serial);
   assert.match(saved.nomountRequestId, /^[a-f0-9]{16}$/);
   assert.equal(dispatches(state).length, 0);
-  const prompt = state.calls.find(call => call.body?.text?.includes("NoMount LKM")).body.text;
-  assert.equal(prompt, "构建 NoMount LKM？");
+  const menu = state.calls.find(call => call.body?.text === "选择 NoMount 内核版本：").body;
+  const prompt = menu.text;
+  assert.deepEqual(menu.reply_markup.inline_keyboard[0].map(button => button.text), ["NoMount · 6.12", "NoMount · 6.18"]);
   assert.ok(prompt.length < 50);
   assert.equal(prompt.includes("\n"), false);
   assert.equal(prompt.includes(serial), false);
+  assertPrivateMessages(state);
+});
+
+test("NoMount kernel selection is nonce-bound and dispatches the selected target", async t => {
+  const { env, state } = await fixture(t);
+  state.sessions.set(42, JSON.stringify(session()));
+  for (const data of [`nomount_kernel:6.19:${requestId}`, `nomount_kernel:6.18:${"b".repeat(16)}`]) {
+    await worker.handleCallback(env, { callback_query: { ...query, id: "select", data } });
+    assert.equal(JSON.parse(state.sessions.get(42)).nomountKernelSeries, undefined);
+  }
+  await worker.handleCallback(env, { callback_query: { ...query, id: "select", data: `nomount_kernel:6.18:${requestId}` } });
+  const selected = JSON.parse(state.sessions.get(42));
+  assert.equal(selected.nomountKernelSeries, "6.18");
+  assert.equal(dispatches(state).length, 0);
+  await worker.dispatchNoMountBuild(env, query, selected, requestId);
+  assert.equal(dispatches(state).length, 0);
+  await worker.dispatchNoMountBuild(env, query, selected, selected.nomountRequestId);
+  assert.equal(dispatches(state)[0].body.inputs.kernel_series, "6.18");
+  assert.equal(JSON.parse(state.jobs[0].inputs).kernel_series, "6.18");
   assertPrivateMessages(state);
 });
 
@@ -204,12 +224,14 @@ test("buildfor offers owner-directed NoMount LKM and binds it to the selected wh
   assert.equal(JSON.parse(state.sessions.get(1)).serial, serial);
 
   await worker.handleCallback(env, { callback_query: { id: "cb-1", from: ownerQuery.from, message: ownerQuery.message, data: "owner_nomount" } });
-  const saved = JSON.parse(state.sessions.get(1));
+  let saved = JSON.parse(state.sessions.get(1));
   assert.equal(saved.serial, serial);
   assert.equal(saved.ownerDirectedBuild, true);
   assert.equal(saved.deliveryChatId, 1);
   assert.match(saved.nomountRequestId, /^[a-f0-9]{16}$/);
-  const confirmation = state.calls.find(call => call.body?.text === "为指定白名单序列号构建独立 NoMount LKM？");
+  await worker.handleCallback(env, { callback_query: { ...ownerQuery, id: "select", data: `nomount_kernel:6.12:${saved.nomountRequestId}` } });
+  saved = JSON.parse(state.sessions.get(1));
+  const confirmation = state.calls.find(call => call.body?.text === "构建 NoMount LKM 6.12？");
   assert.ok(confirmation.body.reply_markup.inline_keyboard.flat().some(button => button.callback_data === `nomount:${saved.nomountRequestId}`));
 
   await worker.dispatchNoMountBuild(env, { ...ownerQuery, message: { ...ownerQuery.message, message_id: 8 } }, saved, saved.nomountRequestId);
@@ -218,7 +240,7 @@ test("buildfor offers owner-directed NoMount LKM and binds it to the selected wh
   assert.equal(dispatch.body.inputs.device_serial, serial);
   assert.equal(JSON.parse(state.jobs[0].inputs).build_kind, "nomount-lkm");
   assert.equal(state.jobs[0].chat_id, 1);
-  assert.equal(state.calls.at(-1).body.text, "已提交，完成后自动发包。");
+  assert.equal(state.calls.at(-1).body.text, "NoMount 6.12 已提交，完成后自动发包。");
 });
 
 test("owner-directed NoMount still rejects non-admins and serials outside the whitelist", async t => {
@@ -262,11 +284,11 @@ test("payload includes the bound serial for display and its SHA256 for validatio
   const [call] = dispatches(state);
   assert.equal(call.url, "https://api.github.com/repos/zaud77/m8v3p6r9x2k4/actions/workflows/lkm.yml/dispatches");
   assert.equal(call.options.headers.authorization, "Bearer new-lkm-fixture-token");
-  assert.deepEqual(Object.keys(call.body.inputs).sort(), ["build_request_id", "device_serial", "device_serial_sha256"]);
+  assert.deepEqual(Object.keys(call.body.inputs).sort(), ["build_request_id", "device_serial", "device_serial_sha256", "kernel_series"]);
   assert.equal(call.body.inputs.device_serial, serial);
   assert.equal(JSON.parse(state.jobs[0].inputs).device_serial, serial);
   assert.equal(state.jobs[0].chat_id, 42);
-  assert.equal(state.calls.at(-1).body.text, "已提交，完成后自动发包。");
+  assert.equal(state.calls.at(-1).body.text, "NoMount 6.12 已提交，完成后自动发包。");
   assertPrivateMessages(state);
 });
 
@@ -353,6 +375,31 @@ test("current runtime-bound package is verified against its exact run kernel art
   assert.ok(state.calls.some(call => call.url.endsWith("/download/kernel-fixture")));
 });
 
+test("6.18 delivery requires the selected target in both package and run attestation", async t => {
+  const inputs = await worker.nomountInputs(serial, requestId, "6.18");
+  const kernelModule = strToU8("fixture-ko");
+  const binding = "a".repeat(64);
+  const info = { device_serial: serial, serial_sha256: inputs.device_serial_sha256, binding,
+    smoke_only: 0, stage: "off", auth_version: 2, kernel_series: "6.18" };
+  const runtime = `NM_LKM_KERNEL='6.18'\nNM_PACKAGE_BINDING='${binding}'\nNM_PACKAGE_SMOKE_ONLY='0'\nNM_PACKAGE_DIAGNOSTIC='0'\nNM_PACKAGE_STAGE='full'\n`;
+  const payload = zipSync({ "lkm/nomount.ko": kernelModule, "runtime.sh": strToU8(runtime),
+    "classes.dex": strToU8("fixture-dex"), "zygisk/arm64-v8a.so": strToU8("fixture-bridge"), "module.prop": strToU8("version=1.81\n") });
+  const attestation = { buildInfo: info, kernelModule };
+  assert.doesNotThrow(() => worker.validateNoMountPackage(payload, inputs.device_serial_sha256, attestation, "6.18"));
+  assert.throws(() => worker.validateNoMountPackage(payload, inputs.device_serial_sha256, attestation, "6.12"));
+  assert.throws(() => worker.validateNoMountPackage(payload, inputs.device_serial_sha256,
+    { ...attestation, buildInfo: { ...info, kernel_series: "6.12" } }, "6.18"));
+  assert.throws(() => worker.validateNoMountPackage(packageBytes(inputs.device_serial_sha256), inputs.device_serial_sha256, null, "6.18"));
+  const checksum = createHash("sha256").update(kernelModule).digest("hex");
+  const kernelArtifactBytes = zipSync({ "nomount.ko": kernelModule, "build-info.json": strToU8(JSON.stringify(info)),
+    "sha256.txt": strToU8(`${checksum}  artifacts/nomount.ko\n`) });
+  const { env, state, job } = await deliveryFixture(t, { kernelSeries: "6.18", packageOverride: payload, kernelArtifactBytes });
+  await worker.processJob(env, job);
+  const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
+  assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-6.18-${serial}.zip`);
+  assert.equal(job.status, "sent");
+});
+
 test("embedded package metadata is delivered without a separate binding file", async t => {
   const digest = (await worker.nomountInputs(serial, requestId)).device_serial_sha256;
   const {env,state,job,payload} = await deliveryFixture(t, {packageOverride:embeddedPackageBytes(digest)});
@@ -366,7 +413,7 @@ test("successful delivery sends the inner installable ZIP, not the artifact wrap
   const { env, state, job, payload } = await deliveryFixture(t);
   await worker.processJob(env, job);
   const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
-  assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-${serial}.zip`);
+  assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-6.12-${serial}.zip`);
   assert.equal(sent.body.get("caption"), "构建完成。");
   assert.deepEqual(new Uint8Array(await sent.body.get("document").arrayBuffer()), payload);
   assert.equal(state.jobs[0].status, "sent");
@@ -382,7 +429,7 @@ test("legacy hash-only pending job delivers with its verified bound serial", asy
   const { env, state, job, payload } = await deliveryFixture(t, { filename, digestOnly: true });
   await worker.processJob(env, job);
   const document = state.calls.find(call => call.url.endsWith("/sendDocument")).body.get("document");
-  assert.equal(document.name, `NoMount-Suite-v1.80-LKM-${serial}.zip`);
+  assert.equal(document.name, `NoMount-Suite-v1.80-LKM-6.12-${serial}.zip`);
   assert.deepEqual(new Uint8Array(await document.arrayBuffer()), payload);
   assert.equal(job.status, "sent");
   assert.equal(job.active_user_id, null);
@@ -948,6 +995,7 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(body.nomountRepository, "zaud77/m8v3p6r9x2k4");
   assert.equal(body.kernelBuildsReady, true);
   assert.equal(body.nomountBuildsReady, true);
+  assert.deepEqual(body.nomountKernelSeries, ["6.12", "6.18"]);
   assert.equal(body.dailyBuildLimit, 2);
   assert.equal(body.quotaIncludesAdmins, false);
   assert.equal(state.jobs.length, 0);

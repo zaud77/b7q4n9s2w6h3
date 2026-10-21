@@ -28,6 +28,7 @@ type Session = {
   ownerDirectedBuild?: boolean;
   deliveryChatId?: number;
   nomountRequestId?: string;
+  nomountKernelSeries?: string;
   menuToken?: string;
   menuMessageId?: number;
   menuChatId?: number;
@@ -38,7 +39,7 @@ const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
 const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
-const COMMAND_MENU_REVISION = "commands:scoped-menus-v6";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v7";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
@@ -47,13 +48,13 @@ const UNVERIFIED_COMMANDS = [
 const VERIFIED_COMMANDS = [
   { command: "start", description: "启动机器人" },
   { command: "build", description: "构建绑定设备的内核" },
-  { command: "nomount", description: "构建绑定序列号的独立 NoMount 模块" },
+  { command: "nomount", description: "构建 NoMount 模块（6.12 / 6.18）" },
   { command: "clear", description: "清除私聊记录和当前操作" },
 ];
 const ADMIN_COMMANDS = [
   { command: "start", description: "启动机器人" },
   { command: "build", description: "构建绑定设备的内核" },
-  { command: "nomount", description: "构建绑定序列号的独立 NoMount 模块" },
+  { command: "nomount", description: "构建 NoMount 模块（6.12 / 6.18）" },
   { command: "clear", description: "清除私聊记录和当前操作" },
   { command: "buildfor", description: "为指定白名单序列号构建" },
   { command: "allow", description: "添加白名单序列号" },
@@ -180,6 +181,16 @@ const ZRAM_SIZE_LABELS: Record<string, string> = Object.fromEntries(
 const KOWSU_LATEST_RELEASE_API = "https://api.github.com/repos/zaominn/KowSU/releases/latest";
 const KOWSU_MANAGER_ASSET = /^KowSU-Manager-.*\.apk$/i;
 const NOMOUNT_PACKAGE_RE = /^(?!.*-SMOKE-NOT-FOR-INSTALL\.zip$)NoMount-Suite-v([0-9]+(?:\.[0-9]+)*)-LKM(?:-[A-Za-z0-9._-]+)?\.zip$/i;
+const NOMOUNT_KERNELS: Record<string, string> = {
+  "6.12": "nomount-android16-6.12-kernel",
+  "6.18": "nomount-android17-6.18-kernel",
+};
+
+function nomountKernelMenu(requestId: string) {
+  return { inline_keyboard: [Object.keys(NOMOUNT_KERNELS).map(series => ({
+    text: `NoMount · ${series}`, callback_data: `nomount_kernel:${series}:${requestId}`,
+  })), [{ text: "取消", callback_data: "cancel" }]] };
+}
 
 function now(): number { return Math.floor(Date.now() / 1000); }
 function admins(env: Env): Set<number> {
@@ -938,8 +949,8 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const nomountRequestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
     await setSession(env, userId, { serial: boundSerial, nomountRequestId });
     await sendMessage(env, chatId,
-      "构建 NoMount LKM？",
-      { inline_keyboard: [[{ text: "开始构建", callback_data: `nomount:${nomountRequestId}` }], [{ text: "取消", callback_data: "cancel" }]] });
+      "选择 NoMount 内核版本：",
+      nomountKernelMenu(nomountRequestId));
     return;
   }
   if (command === "build") {
@@ -1177,10 +1188,11 @@ async function buildQuotaMessage(env: Env, userId: number): Promise<string | nul
   return Number(count?.total || 0) >= limit ? `今天已达到 ${limit} 次构建上限，请在北京时间次日再试。` : null;
 }
 
-async function nomountInputs(serial: string, requestId: string): Promise<Record<string, string>> {
+async function nomountInputs(serial: string, requestId: string, kernelSeries = "6.12"): Promise<Record<string, string>> {
   if (!SERIAL_RE.test(serial) || !/^[a-f0-9]{16}$/.test(requestId)) throw new Error("invalid device build input");
+  if (!Object.hasOwn(NOMOUNT_KERNELS, kernelSeries)) throw new Error("invalid NoMount kernel target");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(serial));
-  return { device_serial: serial, device_serial_sha256: Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, "0")).join(""), build_request_id: requestId };
+  return { kernel_series: kernelSeries, device_serial: serial, device_serial_sha256: Array.from(new Uint8Array(digest)).map(v => v.toString(16).padStart(2, "0")).join(""), build_request_id: requestId };
 }
 
 async function beginOwnerNoMountBuild(env: Env, query: any, session: Session) {
@@ -1202,10 +1214,8 @@ async function beginOwnerNoMountBuild(env: Env, query: any, session: Session) {
   }
   if (await activeBuild(env, userId)) { await reject("已有构建正在进行，请等待完成。"); return; }
   const requestId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
-  await setSession(env, userId, { ...session, nomountRequestId: requestId });
-  await editMessage(env, chatId, messageId, "为指定白名单序列号构建独立 NoMount LKM？", {
-    inline_keyboard: [[{ text: "开始构建", callback_data: `nomount:${requestId}` }], [{ text: "取消", callback_data: "cancel" }]],
-  });
+  await setSession(env, userId, { ...session, nomountRequestId: requestId, nomountKernelSeries: undefined });
+  await editMessage(env, chatId, messageId, "选择 NoMount 内核版本：", nomountKernelMenu(requestId));
 }
 
 async function dispatchNoMountBuild(env: Env, query: any, session: Session, requestId: string) {
@@ -1214,6 +1224,10 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
   if (query.message.chat.type !== "private" || chatId !== userId) { await reject("请私聊机器人使用 /nomount。"); return; }
   if (!session.nomountRequestId || requestId !== session.nomountRequestId || !/^[a-f0-9]{16}$/.test(requestId)) {
     await reject("构建确认已失效，请重新使用 /nomount。"); return;
+  }
+  const kernelSeries = session.nomountKernelSeries || "6.12";
+  if (!Object.hasOwn(NOMOUNT_KERNELS, kernelSeries)) {
+    await reject("内核版本无效，请重新使用 /nomount。"); return;
   }
   if (await activeBuild(env, userId)) { await reject("已有构建正在进行，请等待完成。"); return; }
   const ownerDirected = session.ownerDirectedBuild === true;
@@ -1230,7 +1244,7 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
   }
   const quotaMessage = await buildQuotaMessage(env, userId);
   if (quotaMessage) { await reject(quotaMessage); return; }
-  const inputs = await nomountInputs(serial, requestId);
+  const inputs = await nomountInputs(serial, requestId, kernelSeries);
   const stored = { ...inputs, build_kind: "nomount-lkm", github_repo: env.LKM_GITHUB_REPO, github_ref: env.LKM_GITHUB_REF || "main" };
   const created = now();
   try {
@@ -1257,7 +1271,7 @@ async function dispatchNoMountBuild(env: Env, query: any, session: Session, requ
     await clearSubmittedSession(env, userId, session); await reject("提交失败，请稍后重试。"); return;
   }
   await clearSubmittedSession(env, userId, session);
-  await reject("已提交，完成后自动发包。");
+  await reject(`NoMount ${kernelSeries} 已提交，完成后自动发包。`);
 }
 
 async function handleCallback(env: Env, update: any) {
@@ -1266,6 +1280,21 @@ async function handleCallback(env: Env, update: any) {
   const data = query.data || "";
   if (/^(?:kernel|variant|bind):/.test(data) && !(await canUseScript(env, userId, data.split(":")[1]))) {
     await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
+  }
+  if (data.startsWith("nomount_kernel:")) {
+    const [, series, requestId] = data.split(":");
+    const session = await getSession(env, userId);
+    if (query.message.chat.type !== "private" || Number(chatId) !== Number(userId) ||
+        !Object.hasOwn(NOMOUNT_KERNELS, series) || !/^[a-f0-9]{16}$/.test(requestId || "") ||
+        requestId !== session.nomountRequestId) {
+      await editMessage(env, chatId, messageId, "该菜单已失效，请重新使用 /nomount。"); return;
+    }
+    const confirmationId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+    await setSession(env, userId, { ...session, nomountKernelSeries: series, nomountRequestId: confirmationId });
+    await editMessage(env, chatId, messageId, `构建 NoMount LKM ${series}？`, {
+      inline_keyboard: [[{ text: "开始构建", callback_data: `nomount:${confirmationId}` }], [{ text: "取消", callback_data: "cancel" }]],
+    });
+    return;
   }
   if (data.startsWith("nomount:")) {
     await dispatchNoMountBuild(env, query, await getSession(env, userId), data.slice(8)); return;
@@ -1586,21 +1615,23 @@ async function processJob(env: Env, job: any) {
   const response = await fetch(`${root}/actions/runs/${runId}/artifacts`, { headers });
   if (!response.ok) throw new Error(`artifacts ${response.status}`); const artifacts: any[] = (await response.json() as any).artifacts || [];
   if (lkm) {
+    const kernelSeries = String(inputs.kernel_series || "6.12");
+    if (!Object.hasOwn(NOMOUNT_KERNELS, kernelSeries)) throw new Error("Unknown NoMount build target");
     const artifact = artifacts.find(a => a.name === "nomount-suite-lkm" && !a.expired);
     if (!artifact) throw new Error("NoMount module artifact missing");
     const download = await fetch(artifact.archive_download_url, { headers, redirect: "follow" });
     if (!download.ok) throw new Error(`NoMount artifact download ${download.status}`);
     const module = unwrapArtifact(new Uint8Array(await download.arrayBuffer()), NOMOUNT_PACKAGE_RE);
     if (!module) throw new Error("Expected one installable NoMount module ZIP");
-    const bindingArtifact = artifacts.find(a => a.name === "nomount-android16-6.12-kernel" && !a.expired);
+    const bindingArtifact = artifacts.find(a => a.name === NOMOUNT_KERNELS[kernelSeries] && !a.expired);
     const attestation = bindingArtifact
       ? await downloadNoMountBuildAttestation(bindingArtifact.archive_download_url, headers)
       : null;
-    validateNoMountPackage(module.bytes, inputs.device_serial_sha256, attestation);
+    validateNoMountPackage(module.bytes, inputs.device_serial_sha256, attestation, kernelSeries);
     const serial = String(inputs.device_serial || await serialForUser(env, Number(job.telegram_user_id)) || "");
     const serialMatches = SERIAL_RE.test(serial) && (await nomountInputs(serial, job.request_id)).device_serial_sha256 === inputs.device_serial_sha256;
     const filename = serialMatches
-      ? module.name.replace(NOMOUNT_PACKAGE_RE, (_name, version) => `NoMount-Suite-v${version}-LKM-${serial.replace(/[^A-Za-z0-9._-]/g, "_")}.zip`)
+      ? module.name.replace(NOMOUNT_PACKAGE_RE, (_name, version) => `NoMount-Suite-v${version}-LKM-${kernelSeries}-${serial.replace(/[^A-Za-z0-9._-]/g, "_")}.zip`)
       : module.name;
     await sendDocument(env, Number(job.chat_id), filename, module.bytes, "构建完成。");
     await finishJob(env, job.request_id, "sent", runId); return;
@@ -1653,7 +1684,8 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false;
   return true;
 }
-function validateNoMountPackage(bytes: Uint8Array, serialDigest: string, attestation?: any) {
+function validateNoMountPackage(bytes: Uint8Array, serialDigest: string, attestation?: any, kernelSeries = "6.12") {
+  if (!Object.hasOwn(NOMOUNT_KERNELS, kernelSeries)) throw new Error("Unknown NoMount package target");
   if (!/^[a-f0-9]{64}$/.test(serialDigest || "")) throw new Error("Missing expected device binding");
   const entries = new Map<string, number>();
   const files = unzipSync(bytes, { filter(file) {
@@ -1679,6 +1711,10 @@ function validateNoMountPackage(bytes: Uint8Array, serialDigest: string, attesta
   if (runtimeMetadata) {
     const info = attestation?.buildInfo;
     if (!info) throw new Error("Missing NoMount build attestation");
+    const targets = Array.from(strFromU8(files["runtime.sh"]).matchAll(/^NM_LKM_KERNEL='([^'\r\n]*)'$/gm));
+    const target = targets.length === 0 && kernelSeries === "6.12" ? "6.12" : targets.length === 1 ? targets[0][1] : "";
+    if (target !== kernelSeries || (info.kernel_series || "6.12") !== kernelSeries)
+      throw new Error("NoMount package kernel target does not match the request");
     if (!/^[a-f0-9]{64}$/.test(info.binding || "") || info.binding !== runtimeMetadata.get("binding") ||
       info.serial_sha256 !== serialDigest || info.smoke_only !== 0 || info.stage !== "off" || info.auth_version !== 2)
       throw new Error("NoMount build attestation does not match requested device");
@@ -1687,6 +1723,7 @@ function validateNoMountPackage(bytes: Uint8Array, serialDigest: string, attesta
     if (!attestation.kernelModule || !equalBytes(files["lkm/nomount.ko"] || new Uint8Array(), attestation.kernelModule))
       throw new Error("Packaged NoMount module differs from its verified kernel artifact");
   } else {
+    if (kernelSeries !== "6.12") throw new Error("Missing target-specific NoMount build attestation");
     if (values.get("smoke_only") !== "0" || values.get("serial_sha256") !== serialDigest) throw new Error("Wrong device or smoke package");
     if (values.get("diagnostic") === "1") throw new Error("Diagnostic package cannot be delivered as a normal build");
   }
@@ -1723,7 +1760,7 @@ export default {
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospTestAccess: "admin-or-grant" });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospTestAccess: "admin-or-grant" });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
