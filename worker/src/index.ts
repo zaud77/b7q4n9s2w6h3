@@ -1617,11 +1617,14 @@ async function buildArtifactCatalog(env: Env, repo: string, run: any, runId: num
         if (!assetsResponse.ok) throw new Error(`Private build artifact list ${assetsResponse.status}`);
         const assets: any[] = await assetsResponse.json();
         for (const asset of assets) {
-          const name = String(asset.label || "").startsWith("Build artifact: ") ? String(asset.label).slice(16) : "";
-          if (!name || asset.name !== `artifact-${name}.zip` || artifacts.has(name)) continue;
+          const file = String(asset.label || "").startsWith("Build file: ");
+          const name = file ? String(asset.label).slice(12) : String(asset.label || "").startsWith("Build artifact: ") ? String(asset.label).slice(16) : "";
+          if (!name || artifacts.has(name)) continue;
+          if (file ? !/^[^/\\\r\n\x00]+$/.test(asset.name || "") || [".", ".."].includes(asset.name) : asset.name !== `artifact-${name}.zip`)
+            throw new Error("Private build artifact filename is invalid");
           if (!Number.isSafeInteger(asset.id) || asset.state !== "uploaded" || !/^sha256:[a-f0-9]{64}$/.test(asset.digest || ""))
             throw new Error("Private build artifact metadata is invalid");
-          artifacts.set(name, { name, digest: asset.digest, expired: false,
+          artifacts.set(name, { name, digest: asset.digest, expired: false, fileName: file ? asset.name : undefined,
             archive_download_url: `${root}/releases/assets/${asset.id}` });
         }
         if (assets.length < 100) break;
@@ -1680,7 +1683,9 @@ async function processJob(env: Env, job: any) {
     if (!Object.hasOwn(NOMOUNT_KERNELS, kernelSeries)) throw new Error("Unknown NoMount build target");
     const artifact = artifacts.find(a => a.name === "nomount-suite-lkm" && !a.expired);
     if (!artifact) throw new Error("NoMount module artifact missing");
-    const module = unwrapArtifact(await downloadBuildArtifact(artifact, artifactHeaders), NOMOUNT_PACKAGE_RE);
+    const downloaded = await downloadBuildArtifact(artifact, artifactHeaders);
+    const module = artifact.fileName && NOMOUNT_PACKAGE_RE.test(artifact.fileName)
+      ? { name: artifact.fileName, bytes: downloaded } : unwrapArtifact(downloaded, NOMOUNT_PACKAGE_RE);
     if (!module) throw new Error("Expected one installable NoMount module ZIP");
     const bindingArtifact = artifacts.find(a => a.name === NOMOUNT_KERNELS[kernelSeries] && !a.expired);
     const attestation = bindingArtifact

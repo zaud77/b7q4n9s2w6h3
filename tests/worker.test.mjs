@@ -194,7 +194,8 @@ function privateDelivery(env, state, outer, kernelArtifactBytes, options = {}) {
     if (match) return Response.json({ id: Number(match[2]), tag_name: match[1],
       body: `Encrypted build diagnostics v1\nOrigin: ${options.origin || env.LKM_GITHUB_REPO}\nRun: 99\nAttempt: ${match[2]}\n` });
     if (url === `${root}/releases/2/assets?per_page=100&page=1`)
-      return Response.json([artifact("nomount-suite-lkm", 201, outer),
+      return Response.json([options.fileName ? { ...artifact("nomount-suite-lkm", 201, outer),
+        name: options.fileName, label: "Build file: nomount-suite-lkm" } : artifact("nomount-suite-lkm", 201, outer),
         { id: 299, name: "run-99-suite-0-attempt-2.zip", state: "uploaded" }]);
     if (url === `${root}/releases/1/assets?per_page=100&page=1`)
       return Response.json(kernelArtifactBytes ? [artifact("nomount-android17-6.18-kernel", 202, kernelArtifactBytes)] : []);
@@ -418,15 +419,16 @@ test("6.18 delivery requires the selected target in both package and run attesta
   const checksum = createHash("sha256").update(kernelModule).digest("hex");
   const kernelArtifactBytes = zipSync({ "nomount.ko": kernelModule, "build-info.json": strToU8(JSON.stringify(info)),
     "sha256.txt": strToU8(`${checksum}  artifacts/nomount.ko\n`) });
-  for (const usePrivate of [false, true]) {
+  for (const mode of ["public", "private-wrapper", "private-file"]) {
     const { env, state, job, outer } = await deliveryFixture(t, { kernelSeries: "6.18", packageOverride: payload, kernelArtifactBytes });
-    if (usePrivate) privateDelivery(env, state, outer, kernelArtifactBytes);
+    const fileName = mode === "private-file" ? `NoMount-Suite-v1.81-LKM-6.18-${serial}.zip` : undefined;
+    if (mode !== "public") privateDelivery(env, state, fileName ? payload : outer, kernelArtifactBytes, { fileName });
     await worker.processJob(env, job);
     const sent = state.calls.find(call => call.url.endsWith("/sendDocument"));
-    assert.equal(sent.body.get("document").name, `NoMount-Suite-v1.80-LKM-6.18-${serial}.zip`);
+    assert.equal(sent.body.get("document").name, `NoMount-Suite-v${fileName ? "1.81" : "1.80"}-LKM-6.18-${serial}.zip`);
     assert.deepEqual(new Uint8Array(await sent.body.get("document").arrayBuffer()), payload);
     assert.equal(job.status, "sent");
-    if (usePrivate) {
+    if (mode !== "public") {
       assert.equal(state.calls.some(call => call.url.endsWith("/actions/runs/99/artifacts")), false);
       assert.ok(state.calls.some(call => call.url.includes("build-diagnostics-123-99-1")));
       assertPrivateMessages(state);
