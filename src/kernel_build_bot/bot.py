@@ -965,11 +965,6 @@ class KernelBuildBot:
                 inputs.pop(key, None)
         if inputs.get("ksu_type") == "kowx":
             inputs["ksu_type"] = "kowsu"
-        if inputs.get("ksu_type") == "finasu" and inputs.get("susfs_enable") == "true":
-            await query.edit_message_text(
-                "FinaSU 当前版本暂未适配 SUSFS，请关闭 SUSFS 后提交；可以选择 NoMount。"
-            )
-            return
         if not supports_self_config(workflow_key):
             inputs.pop("self_config", None)
         elif not self.is_admin(user_id):

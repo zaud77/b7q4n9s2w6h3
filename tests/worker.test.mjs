@@ -761,14 +761,16 @@ test("FinaSU is retained in preferences and dispatched with NoMount", async t =>
   assertPrivateMessages(state);
 });
 
-test("unsupported FinaSU SUSFS requests do not reserve jobs or dispatch", async t => {
+test("FinaSU SUSFS requests dispatch with NoMount disabled", async t => {
   const { env, state } = await fixture(t);
   const session = kernelSession();
   Object.assign(session.options, { ksu_type: "finasu", susfs_enable: "true", nomount_enable: "false" });
   await worker.dispatchBuild(env, query, session);
-  assert.equal(dispatches(state).length, 0);
-  assert.equal(state.jobs.length, 0);
-  assert.match(state.calls.at(-1).body.text, /FinaSU.*SUSFS/);
+  assert.equal(dispatches(state).length, 1);
+  assert.equal(state.jobs.length, 1);
+  assert.equal(dispatches(state)[0].body.inputs.ksu_type, "finasu");
+  assert.equal(dispatches(state)[0].body.inputs.susfs_enable, "true");
+  assert.equal(dispatches(state)[0].body.inputs.nomount_enable, "false");
   assertPrivateMessages(state);
 });
 
