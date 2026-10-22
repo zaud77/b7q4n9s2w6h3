@@ -33,6 +33,12 @@ def test_bakasu_selection_migrates_resukisu_preferences():
     assert build_options_with_preferences({"ksu_type": "resukisu"}, True)["ksu_type"] == "bakasu"
 
 
+def test_finasu_selection_is_retained():
+    assert "finasu" in KSU_VALUES
+    assert build_options_with_preferences({"ksu_type": "finasu"}, True)["ksu_type"] == "finasu"
+    assert build_options_with_preferences({"ksu_type": "finasu"}, False)["ksu_type"] == "finasu"
+
+
 def test_serial_owner_and_revoke(tmp_path):
     db = Database(str(tmp_path / "bot.db"), "test-pepper")
     db.allow_serial("3B15A800Y5D00000", 42, 1)

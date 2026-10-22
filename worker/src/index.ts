@@ -160,12 +160,13 @@ const BOOL_OPTION_ROWS = [
   ["rekernel_enable", "baseband_guard"],
   ["self_config"],
 ] as const;
-const KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "ksu", "none"];
+const KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "finasu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
   bakasu: "BakaSU",
   sukisu: "SukiSU Ultra（BakaSU 内核）",
   ksunext: "KernelSU Next",
   kowsu: "KowSU",
+  finasu: "FinaSU",
   // Keep D1 sessions created before the selector rename usable.
   kowx: "KowSU",
   ksu: "KernelSU 原版",
@@ -1137,6 +1138,9 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     options.hmbird_cpuperf_fix = options.hmbird_cpuperf_fix === "true" ? "true" : "false";
   } else delete options.hmbird_cpuperf_fix;
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
+  if (options.ksu_type === "finasu" && options.susfs_enable === "true") {
+    await editMessage(env, chatId, messageId, "FinaSU 当前版本暂未适配 SUSFS，请关闭 SUSFS 后提交；可以选择 NoMount。"); return;
+  }
   if (!isAdmin(env, userId)) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
   const requestId = (await digestSerial(env, `kernel:${userId}:${chatId}:${messageId}`)).slice(0, 16);

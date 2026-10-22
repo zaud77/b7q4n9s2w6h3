@@ -137,12 +137,13 @@ BOOL_OPTION_ROWS = (
     ("rekernel_enable", "baseband_guard"),
     ("self_config",),
 )
-KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "ksu", "none"]
+KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "finasu", "ksu", "none"]
 KSU_LABELS = {
     "bakasu": "BakaSU",
     "sukisu": "SukiSU Ultra（BakaSU 内核）",
     "ksunext": "KernelSU Next",
     "kowsu": "KowSU",
+    "finasu": "FinaSU",
     # Keep stale in-memory sessions from older deployments renderable.
     "kowx": "KowSU",
     "ksu": "KernelSU 原版",
@@ -964,6 +965,11 @@ class KernelBuildBot:
                 inputs.pop(key, None)
         if inputs.get("ksu_type") == "kowx":
             inputs["ksu_type"] = "kowsu"
+        if inputs.get("ksu_type") == "finasu" and inputs.get("susfs_enable") == "true":
+            await query.edit_message_text(
+                "FinaSU 当前版本暂未适配 SUSFS，请关闭 SUSFS 后提交；可以选择 NoMount。"
+            )
+            return
         if not supports_self_config(workflow_key):
             inputs.pop("self_config", None)
         elif not self.is_admin(user_id):

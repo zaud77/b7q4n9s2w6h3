@@ -749,6 +749,29 @@ test("BakaSU is the default kernel manager and old ReSukiSU preferences migrate"
   assert.equal(worker.normalizeBuildOptions({ ksu_type: "resukisu" }, true).ksu_type, "bakasu");
 });
 
+test("FinaSU is retained in preferences and dispatched with NoMount", async t => {
+  assert.equal(worker.normalizeBuildOptions({ ksu_type: "finasu" }, false).ksu_type, "finasu");
+  const { env, state } = await fixture(t);
+  const session = kernelSession();
+  session.options.ksu_type = "finasu";
+  await worker.dispatchBuild(env, query, session);
+  assert.equal(dispatches(state).length, 1);
+  assert.equal(dispatches(state)[0].body.inputs.ksu_type, "finasu");
+  assert.equal(dispatches(state)[0].body.inputs.nomount_enable, "true");
+  assertPrivateMessages(state);
+});
+
+test("unsupported FinaSU SUSFS requests do not reserve jobs or dispatch", async t => {
+  const { env, state } = await fixture(t);
+  const session = kernelSession();
+  Object.assign(session.options, { ksu_type: "finasu", susfs_enable: "true", nomount_enable: "false" });
+  await worker.dispatchBuild(env, query, session);
+  assert.equal(dispatches(state).length, 0);
+  assert.equal(state.jobs.length, 0);
+  assert.match(state.calls.at(-1).body.text, /FinaSU.*SUSFS/);
+  assertPrivateMessages(state);
+});
+
 test("concurrent kernel clicks reserve one active slot before dispatch", async t => {
   const { env, state } = await fixture(t);
   await Promise.all([worker.dispatchBuild(env, query, kernelSession()), worker.dispatchBuild(env, query, kernelSession())]);
