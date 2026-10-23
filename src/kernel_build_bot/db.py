@@ -95,7 +95,6 @@ class Database:
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(build_jobs)")}
             if "inputs" not in job_columns:
                 db.execute("ALTER TABLE build_jobs ADD COLUMN inputs TEXT NOT NULL DEFAULT '{}'")
-            # Preserve feature selections for jobs submitted before this migration.
             db.execute(
                 """UPDATE build_jobs
                    SET inputs=COALESCE((

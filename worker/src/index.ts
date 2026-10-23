@@ -128,7 +128,6 @@ const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable"]);
 const AOSP_OPTIONS = new Set([...AOSP_BOOL_OPTIONS, "zram_default_algorithm", "zram_size_gib"]);
 const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
   ...WORKFLOW_SCRIPTS,
-  // Normalize persisted workflow choices back to their device binding keys.
   "658g": "658",
   "658p": "658",
   "658mp": "658m",
@@ -167,7 +166,6 @@ const KSU_LABELS: Record<string, string> = {
   ksunext: "KernelSU Next",
   kowsu: "KowSU",
   finasu: "FinaSU",
-  // Keep D1 sessions created before the selector rename usable.
   kowx: "KowSU",
   ksu: "KernelSU 原版",
   none: "无内置 KernelSU",

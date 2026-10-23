@@ -104,7 +104,6 @@ AOSP_WORKFLOW_KEYS = {AOSP_WORKFLOW_KEY, AOSP_TEST_WORKFLOW_KEY}
 AOSP_BOOL_OPTIONS = {"zram_writeback_enable", "qpace_enable"}
 LEGACY_WORKFLOW_KEYS = {
     **WORKFLOW_SCRIPTS,
-    # Normalize persisted workflow choices back to their device binding keys.
     "658g": "658",
     "658p": "658",
     "658mp": "658m",
@@ -144,7 +143,6 @@ KSU_LABELS = {
     "ksunext": "KernelSU Next",
     "kowsu": "KowSU",
     "finasu": "FinaSU",
-    # Keep stale in-memory sessions from older deployments renderable.
     "kowx": "KowSU",
     "ksu": "KernelSU 原版",
     "none": "无内置 KernelSU",
@@ -521,8 +519,6 @@ class KernelBuildBot:
             )
             return
         context.user_data.clear()
-        # The owner can choose any workflow on every build. Regular users keep
-        # their first selected workflow binding.
         bound_workflow = (
             None
             if self.is_admin(user.id)
@@ -968,8 +964,6 @@ class KernelBuildBot:
         if not supports_self_config(workflow_key):
             inputs.pop("self_config", None)
         elif not self.is_admin(user_id):
-            # Enforce owner-only configuration at dispatch time too, including
-            # stale keyboards and forged callback payloads.
             inputs["self_config"] = "false"
         inputs["device_serial"] = serial
         request_id = secrets.token_hex(8)
@@ -1122,9 +1116,6 @@ class KernelBuildBot:
                     ),
                     None,
                 )
-                # User-facing run names contain the kernel version and bound
-                # serial. Keep the opaque correlation id in the build job name
-                # and inspect only newly-created candidate runs when needed.
                 if run is None:
                     created_after = int(job["created_at"]) - 120
                     for candidate in workflow_runs:
@@ -1287,7 +1278,6 @@ class KernelBuildBot:
                             chat_id=job["chat_id"],
                             document=document,
                             filename=send_name,
-                            # Regular recipients receive files without build details.
                             caption=caption if self.is_admin(job["chat_id"]) else None,
                             read_timeout=120,
                             write_timeout=120,
@@ -1550,7 +1540,6 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stdout,
     )
-    # httpx logs the full Bot API URL, which contains the Telegram token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     KernelBuildBot(Settings.from_env()).application().run_polling(drop_pending_updates=True)
 
