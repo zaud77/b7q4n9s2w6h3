@@ -11,7 +11,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, handleCallback, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions };";
+  + "\nexport { handleCommand, handleCallback, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -599,94 +599,86 @@ test("AOSP dispatch forwards experiments and never inherits the owner-only workf
   assert.equal(call.body.inputs.zram_default_algorithm, "qpace-lz4");
   assert.equal(call.body.inputs.zram_size_gib, "16");
   assert.equal(call.body.inputs.self_config, "false");
-  assert.equal(call.body.inputs.hmbird_cpuperf_fix, undefined);
+  assert.equal(call.body.inputs.hmbird_cpuperf_fix, "false");
   assertPrivateMessages(state);
 });
 
-test("AOSP test entry is visible only to administrators or explicitly granted users", async t => {
+test("AOSP is a single mainline entry for administrators and regular users", async t => {
   const { env, state } = await fixture(t, { workflowBinding: null });
-  const menu = async () => {
+  for (const admin of [false, true]) {
+    env.ADMIN_USER_IDS = admin ? "42" : "1";
     await worker.handleCommand(env, { message: { from: query.from, chat: query.message.chat } }, "build", []);
-    return state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
-  };
-  assert.ok(!(await menu()).some(button => button.callback_data === "kernel:669aosp-test"));
-  state.botState.set("workflow_access:669aosp-test:42", "1");
-  assert.ok((await menu()).some(button => button.callback_data === "kernel:669aosp-test"));
-  state.botState.clear();
-  env.ADMIN_USER_IDS = "42";
-  assert.ok((await menu()).some(button => button.callback_data === "kernel:669aosp-test"));
+    const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
+    assert.equal(buttons.filter(button => button.callback_data === "kernel:669aosp").length, 1);
+    assert.ok(!buttons.some(button => button.callback_data === "kernel:669aosp-test"));
+  }
 });
 
-test("stale and forged AOSP test callbacks cannot bypass its access gate", async t => {
+test("retired test callbacks cannot create a build even with an old grant", async t => {
   const { env, state } = await fixture(t, { workflowBinding: "669aosp-test" });
+  state.botState.set("workflow_access:669aosp-test:42", "1");
   state.sessions.set(42, JSON.stringify({ serial, selectedScript: "669aosp-test", workflow: "669aosp-test", options: {} }));
   for (const data of ["kernel:669aosp-test", "bind:669aosp-test", "variant:669aosp-test:gki", "dispatch"])
     await worker.handleCallback(env, { callback_query: { ...query, id: data, data } });
   await worker.dispatchBuild(env, query, { serial, workflow: "669aosp-test", options: {} });
   assert.equal(dispatches(state).length, 0);
-  assert.ok(state.calls.filter(call => call.body?.text?.includes("尚未向你开放")).length >= 5);
 });
 
-test("authorized AOSP test dispatch requires binding and selects the fixed test branch", async t => {
+test("mainline AOSP dispatch requires ordinary binding and forwards HMBIRD options", async t => {
   const { env, state } = await fixture(t, { workflowBinding: null });
-  state.botState.set("workflow_access:669aosp-test:42", "1");
-  const draft = { serial, workflow: "669aosp-test", options: { ...worker.normalizeBuildOptions({}, false), qpace_enable: "true", zram_size_gib: "16", hmbird_cpuperf_fix: "true" } };
+  const draft = { serial, workflow: "669aosp", options: { ...worker.normalizeBuildOptions({}, false), qpace_enable: "true", zram_size_gib: "16", hmbird_cpuperf_fix: "true" } };
   await worker.dispatchBuild(env, query, draft);
   assert.equal(dispatches(state).length, 0);
   const click = data => worker.handleCallback(env, { callback_query: { ...query, id: data, data } });
   state.sessions.set(42, JSON.stringify({ serial, options: {} }));
-  await click("kernel:669aosp-test");
-  await click("bind:669aosp-test");
-  await click("variant:669aosp-test:gki");
+  await click("kernel:669aosp");
+  await click("bind:669aosp");
+  await click("variant:669aosp:gki");
   const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
   assert.ok(buttons.some(button => button.callback_data === "set:qpace_enable:true"));
   assert.ok(buttons.some(button => button.callback_data === "set:hmbird_cpuperf_fix:true"));
   await worker.dispatchBuild(env, query, draft);
   const [call] = dispatches(state);
-  assert.equal(call.body.ref, "test/aosp-hmbird-oneplus15-20261020");
-  assert.equal(call.body.inputs.qpace_enable, "true");
-  assert.equal(call.body.inputs.zram_size_gib, "16");
+  assert.equal(call.body.ref, "main");
   assert.equal(call.body.inputs.hmbird_cpuperf_fix, "true");
   assert.equal(call.body.inputs.ccache_update, undefined);
   assert.equal(call.body.inputs.ccache_debug, undefined);
-  assert.equal(call.body.inputs.github_ref, undefined);
-  assert.equal(JSON.parse(state.jobs[0].inputs).github_ref, call.body.ref);
-  assert.equal(state.workflowBinding, "669aosp-test");
+  assert.equal(state.workflowBinding, "669aosp");
   assertPrivateMessages(state);
 });
 
-test("AOSP grant unbinds only the intended user and preserves identity, preferences and jobs", async t => {
+test("mainline migration removes test grants and preserves normal identity, quotas and jobs", async t => {
   const { env, database, timestamp, addJob } = await quotaFixture(t);
   addJob({ status: "running" });
+  database.prepare("UPDATE workflow_bindings SET workflow_key='669aosp-test' WHERE telegram_user_id=42").run();
+  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(99, "623", timestamp);
   database.prepare("INSERT INTO user_build_preferences VALUES(?,?,?)").run(42, '{"qpace_enable":"true"}', timestamp);
-  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, '{"workflow":"623g"}', timestamp);
-  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(99, "669aosp", timestamp);
-  const update = { message: { from: { id: 1 }, chat: { id: 1, type: "private" } } };
-  await worker.handleCommand(env, update, "aosptest", [serial]);
-  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key=?").get("workflow_access:669aosp-test:42").value, "1");
-  assert.equal(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
-  assert.equal(database.prepare("SELECT * FROM sessions WHERE telegram_user_id=42").get(), undefined);
-  assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=99").get().workflow_key, "669aosp");
-  assert.equal(database.prepare("SELECT owner_user_id FROM serial_bindings").get().owner_user_id, 42);
+  database.prepare("INSERT INTO quota_resets VALUES(?,?)").run(42, timestamp);
+  for (const [id, data] of [[42, '{"workflow":"669aosp-test"}'], [99, '{"workflow":"623g"}'],
+                            [100, '{"selectedScript":"669aosp-test"}'], [101, 'invalid-json']])
+    database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(id, data, timestamp);
+  for (const [key, value] of [["workflow_access:669aosp-test:42", "1"], ["workflow_access:669aosp-test:99", "0"],
+                              ["workflow_access:other:42", "1"], ["quota_count_failures:42", "1"]])
+    database.prepare("INSERT INTO bot_state VALUES(?,?)").run(key, value);
+  await worker.applyAospMainlineMigration(env);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM bot_state WHERE key GLOB 'workflow_access:669aosp-test:*'").get().count, 0);
+  assert.deepEqual({ ...database.prepare("SELECT workflow_key,bound_at FROM workflow_bindings WHERE telegram_user_id=42").get() }, { workflow_key: "669aosp", bound_at: timestamp });
+  assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=99").get().workflow_key, "623");
+  assert.deepEqual(database.prepare("SELECT telegram_user_id FROM sessions ORDER BY telegram_user_id").all().map(row => row.telegram_user_id), [99, 101]);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM serial_bindings").get().count, 1);
   assert.equal(database.prepare("SELECT options FROM user_build_preferences WHERE telegram_user_id=42").get().options, '{"qpace_enable":"true"}');
   assert.equal(database.prepare("SELECT status FROM build_jobs").get().status, "running");
-  await worker.handleCommand(env, update, "aosptest", ["99"]);
-  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key=?").get("workflow_access:669aosp-test:99").value, "1");
+  assert.equal(database.prepare("SELECT reset_at FROM quota_resets WHERE telegram_user_id=42").get().reset_at, timestamp);
+  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key='quota_count_failures:42'").get().value, "1");
+  assert.equal(database.prepare("SELECT value FROM bot_state WHERE key='workflow_access:other:42'").get().value, "1");
+  await worker.applyAospMainlineMigration(env);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sessions").get().count, 2);
 });
 
-test("test access revocation invalidates test binding and stale drafts without changing regular bindings", async t => {
-  const { env, state, database, timestamp } = await quotaFixture(t);
-  const update = { message: { from: { id: 1 }, chat: { id: 1, type: "private" } } };
-  await worker.handleCommand(env, update, "aosptest", ["42"]);
-  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(42, "669aosp-test", timestamp);
-  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, '{"workflow":"669aosp-test"}', timestamp);
-  await worker.handleCommand(env, update, "aosptest", ["42", "off"]);
-  assert.equal(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
-  assert.equal(database.prepare("SELECT * FROM sessions WHERE telegram_user_id=42").get(), undefined);
-  await worker.dispatchBuild(env, query, { serial, workflow: "669aosp-test", options: {} });
-  assert.equal(dispatches(state).length, 0);
-  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(42, "623", timestamp);
-  await worker.handleCommand(env, update, "aosptest", ["42", "off"]);
+test("removed test grant command is not registered or executable", async t => {
+  const { env, database } = await quotaFixture(t);
+  await worker.handleCommand(env, { message: { from: { id: 1 }, chat: { id: 1, type: "private" } } }, "aosptest", [serial]);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM bot_state WHERE key GLOB 'workflow_access:*'").get().count, 0);
   assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=42").get().workflow_key, "623");
 });
 
@@ -814,7 +806,7 @@ test("admin kernel requests are parallel across menus but duplicate confirmation
 test("a finishing submission does not erase a newer administrator draft", async t => {
   const { env, state } = await fixture(t);
   env.ADMIN_USER_IDS = "42";
-  const next = JSON.stringify({ serial, workflow: "669aosp-test", options: { qpace_enable: "true" } });
+  const next = JSON.stringify({ serial, workflow: "669aosp", options: { qpace_enable: "true" } });
   state.sessions.set(42, next);
   await worker.dispatchBuild(env, query, kernelSession());
   assert.equal(state.sessions.get(42), next);
@@ -838,11 +830,10 @@ test("old administrator menus cannot submit a newer draft's workflow or options"
   assert.match(state.calls.at(-1).body.text, /菜单已失效/);
 });
 
-test("quick options atomically enforce both the test grant and the originating menu", async t => {
+test("AOSP quick options enforce the workflow and originating menu without special grants", async t => {
   const { env, state, database, timestamp } = await quotaFixture(t);
   for (const key of ["qpace_enable", "hmbird_cpuperf_fix"]) {
-    database.prepare("INSERT OR REPLACE INTO bot_state VALUES(?,?)").run("workflow_access:669aosp-test:42", "1");
-    const draft = { serial, workflow: "669aosp-test", options: { [key]: "false" }, menuMessageId: 9, menuChatId: 42 };
+    const draft = { serial, workflow: "669aosp", options: { [key]: "false" }, menuMessageId: 9, menuChatId: 42 };
     database.prepare("INSERT OR REPLACE INTO sessions VALUES(?,?,?)").run(42, JSON.stringify(draft), timestamp);
     const click = messageId => worker.handleCallback(env, { callback_query: { ...query, id: "option", data: `set:${key}:true`,
       message: { ...query.message, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: key, callback_data: `set:${key}:true` }]] } } } });
@@ -851,22 +842,16 @@ test("quick options atomically enforce both the test grant and the originating m
     assert.equal(value(), "false");
     await click(9);
     assert.equal(value(), "true");
-    database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify(draft));
-    database.prepare("UPDATE bot_state SET value='0' WHERE key=?").run("workflow_access:669aosp-test:42");
+    database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify({ ...draft, workflow: "623g" }));
     await click(9);
     assert.equal(value(), "false");
-    if (key === "hmbird_cpuperf_fix") {
-      database.prepare("UPDATE sessions SET data=? WHERE telegram_user_id=42").run(JSON.stringify({ ...draft, workflow: "669aosp" }));
-      await click(9);
-      assert.equal(value(), "false");
-    }
   }
   assert.equal(dispatches(state).length, 0);
 });
 
-test("test jobs cannot associate a same-title run from the regular branch", async t => {
+test("historical jobs cannot associate a same-title run from a different branch", async t => {
   const { env, state, database, timestamp } = await quotaFixture(t);
-  const ref = "test/aosp-hmbird-oneplus15-20261020";
+  const ref = "archive/historical-build";
   const inputs = JSON.stringify({ build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref });
   database.prepare("INSERT INTO build_jobs(request_id,telegram_user_id,chat_id,workflow_file,inputs,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
     .run(requestId, 42, 42, "build_aosp_6.12.69_gki.yml", inputs, "submitted", timestamp, timestamp);

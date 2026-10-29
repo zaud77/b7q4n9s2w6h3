@@ -44,10 +44,11 @@ jobs:
               and .quotaMigration == "migration:successful-build-quota-v1"
               and .chatHistoryMigration == "migration:private-chat-clear-v1"
               and .buildPreferencesMigration == "migration:user-build-preferences-v1"
-              and .commandMenus == "commands:scoped-menus-v7"
+              and .commandMenus == "commands:scoped-menus-v8"
               and .nomountKernelSeries == ["6.12", "6.18"]
               and .adminParallelBuilds == true
-              and .aospTestAccess == "admin-or-grant"
+              and .aospMainlineMigration == "migration:aosp-mainline-v1"
+              and .aospMainline == true
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
               and .privateBuildsReady == true

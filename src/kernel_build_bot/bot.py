@@ -33,7 +33,6 @@ from .db import Database
 SERIAL_RE = re.compile(r"^[A-Za-z0-9._:-]{6,64}$")
 
 SCRIPTS = {
-    "669aosp-test": ("6.12.69·AOSP（风驰测试）", {"gki": ("通用 GKI", "669aosp-test")}),
     "669aosp": ("6.12.69·AOSP", {"gki": ("通用 GKI", "669aosp")}),
     "623": (
         "6.12.23 · OnePlus 15",
@@ -77,7 +76,6 @@ SCRIPTS = {
     ),
 }
 WORKFLOWS = {
-    "669aosp-test": ("6.12.69·AOSP（风驰测试）", "build_aosp_6.12.69_gki.yml"),
     "669aosp": ("6.12.69·AOSP", "build_aosp_6.12.69_gki.yml"),
     "623g": ("6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"),
     "623p": ("6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"),
@@ -98,10 +96,8 @@ WORKFLOW_SCRIPTS = {
 ONEPLUS_15_WORKFLOW_KEYS = {"623g", "623p"}
 ONEPLUS_15T_WORKFLOW_KEYS = {"638tg", "638tp"}
 AOSP_WORKFLOW_KEY = "669aosp"
-AOSP_TEST_WORKFLOW_KEY = "669aosp-test"
-AOSP_TEST_REF = "test/aosp-hmbird-oneplus15-20261020"
-AOSP_WORKFLOW_KEYS = {AOSP_WORKFLOW_KEY, AOSP_TEST_WORKFLOW_KEY}
-AOSP_BOOL_OPTIONS = {"zram_writeback_enable", "qpace_enable"}
+AOSP_WORKFLOW_KEYS = {AOSP_WORKFLOW_KEY}
+AOSP_BOOL_OPTIONS = {"zram_writeback_enable", "qpace_enable", "hmbird_cpuperf_fix"}
 LEGACY_WORKFLOW_KEYS = {
     **WORKFLOW_SCRIPTS,
     "658g": "658",
@@ -248,11 +244,10 @@ def normalize_workflow_key(workflow_key: str | None) -> str | None:
     return LEGACY_WORKFLOW_KEYS.get(workflow_key, workflow_key)
 
 
-def script_markup(show_test: bool = False) -> InlineKeyboardMarkup:
+def script_markup() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(label, callback_data=f"kernel:{key}")]
         for key, (label, _) in SCRIPTS.items()
-        if key != AOSP_TEST_WORKFLOW_KEY or show_test
     ]
     keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
     return InlineKeyboardMarkup(keyboard)
@@ -286,9 +281,6 @@ class KernelBuildBot:
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.settings.admin_user_ids
-
-    def can_use_script(self, user_id: int, key: str) -> bool:
-        return key != AOSP_TEST_WORKFLOW_KEY or self.is_admin(user_id) or self.db.workflow_access(user_id, key)
 
     async def reject_while_building(self, update: Update) -> bool:
         user = update.effective_user
@@ -340,7 +332,6 @@ class KernelBuildBot:
                 BotCommand("revoke", "撤销白名单序列号"),
                 BotCommand("resetquota", "重置序列号构建次数"),
                 BotCommand("unbindscript", "解除指定序列号或全部用户的脚本绑定"),
-                BotCommand("aosptest", "授权或撤销用户的 AOSP 风驰测试入口"),
                 BotCommand("allowed", "查看完整白名单"),
                 BotCommand("joinlink", "获取入群验证链接"),
             ]
@@ -529,7 +520,7 @@ class KernelBuildBot:
         )
         context.user_data.update(serial=serial, options=options)
         if bound_workflow:
-            if bound_workflow not in SCRIPTS or not self.can_use_script(user.id, bound_workflow):
+            if bound_workflow not in SCRIPTS:
                 await update.effective_message.reply_text("已绑定的构建脚本当前不可用，请联系管理员。")
                 return
             variants = SCRIPTS[bound_workflow][1]
@@ -558,7 +549,7 @@ class KernelBuildBot:
             )
             return
         prompt = "请选择本次构建脚本：" if self.is_admin(user.id) else "首次构建，请选择要绑定的构建脚本："
-        await update.effective_message.reply_text(prompt, reply_markup=script_markup(self.can_use_script(user.id, AOSP_TEST_WORKFLOW_KEY)))
+        await update.effective_message.reply_text(prompt, reply_markup=script_markup())
 
     async def build_for(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
@@ -591,7 +582,7 @@ class KernelBuildBot:
         )
         await update.effective_message.reply_text(
             f"为序列号 {serial} 构建；完成后的产物只发送给你。\n请选择构建脚本：",
-            reply_markup=script_markup(self.can_use_script(user.id, AOSP_TEST_WORKFLOW_KEY)),
+            reply_markup=script_markup(),
         )
 
     async def text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -653,7 +644,6 @@ class KernelBuildBot:
                 for key in keys
                 if (key != "self_config" or show_self_config)
                 and (key not in AOSP_BOOL_OPTIONS or workflow_key in AOSP_WORKFLOW_KEYS)
-                and (key != "hmbird_cpuperf_fix" or workflow_key == AOSP_TEST_WORKFLOW_KEY)
             ]
             if row:
                 rows.append(row)
@@ -679,12 +669,6 @@ class KernelBuildBot:
         query = update.callback_query
         await query.answer()
         data = query.data
-        access_key = data.split(":")[1] if data.startswith(("kernel:", "bind:", "variant:")) else (
-            context.user_data.get("workflow") or context.user_data.get("selected_script", "")
-        )
-        if data != "cancel" and not self.can_use_script(query.from_user.id, access_key):
-            await query.edit_message_text("该构建入口尚未向你开放，请联系管理员。")
-            return
         quick_options_action = data.startswith(("toggle:", "cycle:", "set:"))
         if (
             not self.is_admin(query.from_user.id)
@@ -714,7 +698,7 @@ class KernelBuildBot:
                         reply_markup=variant_markup(bound_script, show_back=False),
                     )
                     return
-            await query.edit_message_text("请选择本次构建脚本：", reply_markup=script_markup(self.can_use_script(query.from_user.id, AOSP_TEST_WORKFLOW_KEY)))
+            await query.edit_message_text("请选择本次构建脚本：", reply_markup=script_markup())
             return
         if data == "back:variant":
             workflow_key = context.user_data.pop("workflow", "")
@@ -829,7 +813,7 @@ class KernelBuildBot:
                 context.user_data.pop("workflow", None)
                 await query.edit_message_text(
                     "尚未绑定脚本，请先选择机型并点击“绑定此脚本”。",
-                    reply_markup=script_markup(self.can_use_script(query.from_user.id, AOSP_TEST_WORKFLOW_KEY)),
+                    reply_markup=script_markup(),
                 )
                 return
         options = context.user_data.get("options")
@@ -841,8 +825,6 @@ class KernelBuildBot:
         if data.startswith("set:"):
             _, key, new_value = data.split(":", 2)
             if key in AOSP_BOOL_OPTIONS and workflow_key not in AOSP_WORKFLOW_KEYS:
-                return
-            if key == "hmbird_cpuperf_fix" and workflow_key != AOSP_TEST_WORKFLOW_KEY:
                 return
             if key in BOOL_LABELS and new_value in {"false", "true"}:
                 if key == "self_config" and not self.is_admin(query.from_user.id):
@@ -864,8 +846,6 @@ class KernelBuildBot:
         elif data.startswith("toggle:"):
             key = data.split(":", 1)[1]
             if key in AOSP_BOOL_OPTIONS and workflow_key not in AOSP_WORKFLOW_KEYS:
-                return
-            if key == "hmbird_cpuperf_fix" and workflow_key != AOSP_TEST_WORKFLOW_KEY:
                 return
             if key not in BOOL_LABELS:
                 return
@@ -903,9 +883,6 @@ class KernelBuildBot:
             return
         serial = context.user_data.get("serial", "")
         workflow_key = context.user_data.get("workflow", "")
-        if not self.can_use_script(user_id, workflow_key):
-            await query.edit_message_text("该构建入口尚未向你开放，请联系管理员。")
-            return
         owner_directed = bool(context.user_data.get("owner_directed_build"))
         serial_authorized = (
             self.is_admin(user_id) and owner_directed and self.db.serial_is_allowed(serial)
@@ -950,7 +927,7 @@ class KernelBuildBot:
         _, workflow = WORKFLOWS[workflow_key]
         inputs = dict(context.user_data["options"])
         inputs.pop("zarm_tool", None)
-        if workflow_key == AOSP_TEST_WORKFLOW_KEY:
+        if workflow_key == AOSP_WORKFLOW_KEY:
             inputs.pop("ccache_update", None)
             inputs.pop("ccache_debug", None)
             inputs["hmbird_cpuperf_fix"] = "true" if inputs.get("hmbird_cpuperf_fix") == "true" else "false"
@@ -968,7 +945,7 @@ class KernelBuildBot:
         inputs["device_serial"] = serial
         request_id = secrets.token_hex(8)
         inputs["build_request_id"] = request_id
-        ref = AOSP_TEST_REF if workflow_key == AOSP_TEST_WORKFLOW_KEY else self.settings.github_ref
+        ref = self.settings.github_ref
         if self.settings.github_use_gh_cli:
             args = [
                 "gh", "workflow", "run", workflow,
@@ -1046,7 +1023,6 @@ class KernelBuildBot:
             BotCommand("revoke", "撤销白名单序列号"),
             BotCommand("resetquota", "重置序列号构建次数"),
             BotCommand("unbindscript", "解除指定序列号或全部用户的脚本绑定"),
-            BotCommand("aosptest", "授权或撤销用户的 AOSP 风驰测试入口"),
             BotCommand("allowed", "查看完整白名单"),
             BotCommand("joinlink", "获取入频道验证链接"),
         ]
@@ -1420,37 +1396,6 @@ class KernelBuildBot:
             "序列号、构建选项、额度和进行中的构建不变；下次 /build 需重新选择并绑定脚本。"
         )
 
-    async def aosp_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self.is_admin(update.effective_user.id) or update.effective_chat.id != update.effective_user.id:
-            await update.effective_message.reply_text("请管理员私聊机器人使用此命令。")
-            return
-        mode = context.args[1].lower() if len(context.args) > 1 else "on"
-        if not context.args or len(context.args) > 2 or mode not in {"on", "off"}:
-            await update.effective_message.reply_text("用法：/aosptest 序列号或Telegram用户ID [on|off]；默认 on，授权后清除原脚本绑定。")
-            return
-        target = context.args[0]
-        if re.fullmatch(r"[1-9][0-9]*", target):
-            owner = int(target)
-            if owner > 2**53 - 1:
-                owner = None
-        else:
-            owner = self.db.owner_for_serial(target) if self.db.serial_is_allowed(target) else None
-        if owner is None:
-            await update.effective_message.reply_text("请输入有效的 Telegram 用户 ID，或已绑定启用账号的序列号。")
-            return
-        self.db.set_workflow_access(owner, AOSP_TEST_WORKFLOW_KEY, mode == "on")
-        user_data = context.application.user_data.get(owner)
-        if user_data is not None and (mode == "on" or
-                user_data.get("workflow") == AOSP_TEST_WORKFLOW_KEY or
-                user_data.get("selected_script") == AOSP_TEST_WORKFLOW_KEY):
-            user_data.clear()
-        await update.effective_message.reply_text(
-            f"已向用户 {owner} 开放 6.12.69·AOSP（风驰测试），并解除原脚本绑定。"
-            "该用户仍需通过序列号、群组验证，在 /build 中选择并绑定后才能构建。"
-            if mode == "on" else
-            f"已撤销用户 {owner} 的 AOSP 测试授权，并清除其测试脚本绑定；其他脚本绑定和进行中的构建不变。"
-        )
-
     async def join_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.reject_while_building(update):
             return
@@ -1522,7 +1467,6 @@ class KernelBuildBot:
         app.add_handler(CommandHandler("revoke", self.revoke))
         app.add_handler(CommandHandler("resetquota", self.reset_quota))
         app.add_handler(CommandHandler("unbindscript", self.unbind_script))
-        app.add_handler(CommandHandler("aosptest", self.aosp_test))
         app.add_handler(CommandHandler("allowed", self.allowed))
         app.add_handler(CommandHandler("joinlink", self.join_link))
         app.add_handler(MessageHandler(filters.ALL, self.track_chat_message), group=-1)

@@ -42,7 +42,8 @@ const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
 const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
-const COMMAND_MENU_REVISION = "commands:scoped-menus-v7";
+const COMMAND_MENU_REVISION = "commands:scoped-menus-v8";
+const AOSP_MAINLINE_MIGRATION_KEY = "migration:aosp-mainline-v1";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
@@ -64,14 +65,10 @@ const ADMIN_COMMANDS = [
   { command: "revoke", description: "撤销白名单序列号" },
   { command: "resetquota", description: "重置序列号构建次数" },
   { command: "unbindscript", description: "解除指定序列号或全部用户的脚本绑定" },
-  { command: "aosptest", description: "授权或撤销用户的 AOSP 风驰测试入口" },
   { command: "allowed", description: "查看完整白名单" },
   { command: "joinlink", description: "获取入群验证链接" },
 ];
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
-  "669aosp-test": ["6.12.69·AOSP（风驰测试）", {
-    gki: ["通用 GKI", "669aosp-test"],
-  }],
   "669aosp": ["6.12.69·AOSP", {
     gki: ["通用 GKI", "669aosp"],
   }],
@@ -99,7 +96,6 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
   }],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
-  "669aosp-test": ["6.12.69·AOSP（风驰测试）", "build_aosp_6.12.69_gki.yml"],
   "669aosp": ["6.12.69·AOSP", "build_aosp_6.12.69_gki.yml"],
   "623g": ["6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
   "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
@@ -120,11 +116,8 @@ const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
 const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
 const AOSP_WORKFLOW_KEY = "669aosp";
-const AOSP_TEST_WORKFLOW_KEY = "669aosp-test";
-const AOSP_TEST_REF = "test/aosp-hmbird-oneplus15-20261020";
-const AOSP_TEST_ACCESS_PREFIX = `workflow_access:${AOSP_TEST_WORKFLOW_KEY}:`;
-const AOSP_WORKFLOW_KEYS = new Set([AOSP_WORKFLOW_KEY, AOSP_TEST_WORKFLOW_KEY]);
-const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable"]);
+const AOSP_WORKFLOW_KEYS = new Set([AOSP_WORKFLOW_KEY]);
+const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable", "hmbird_cpuperf_fix"]);
 const AOSP_OPTIONS = new Set([...AOSP_BOOL_OPTIONS, "zram_default_algorithm", "zram_size_gib"]);
 const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
   ...WORKFLOW_SCRIPTS,
@@ -199,12 +192,6 @@ function admins(env: Env): Set<number> {
   return new Set(env.ADMIN_USER_IDS.split(",").map(v => Number(v.trim())).filter(Boolean));
 }
 function isAdmin(env: Env, userId: number): boolean { return admins(env).has(userId); }
-async function canUseScript(env: Env, userId: number, key: string): Promise<boolean> {
-  if (key !== AOSP_TEST_WORKFLOW_KEY || isAdmin(env, userId)) return true;
-  const row: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?")
-    .bind(`${AOSP_TEST_ACCESS_PREFIX}${userId}`).first();
-  return row?.value === "1";
-}
 function defaults(): Record<string, string> {
   const values: Record<string, string> = {};
   for (const key of Object.keys(BOOL_LABELS)) values[key] = "false";
@@ -495,11 +482,7 @@ async function serialForUser(env: Env, userId: number): Promise<string | null> {
   ).bind(userId).first();
   return row?.serial_value || null;
 }
-async function userForTarget(env: Env, target: string, allowUserId = false): Promise<number | null> {
-  if (allowUserId && /^[1-9][0-9]*$/.test(target)) {
-    const userId = Number(target);
-    return Number.isSafeInteger(userId) ? userId : null;
-  }
+async function userForTarget(env: Env, target: string): Promise<number | null> {
   if (!SERIAL_RE.test(target)) return null;
   const row: any = await env.DB.prepare(
     "SELECT owner_user_id FROM serial_bindings WHERE serial_hash=? AND enabled=1"
@@ -518,21 +501,6 @@ async function unbindScripts(env: Env, userId: number | null): Promise<number> {
   return Number(result[1].meta.changes || 0);
 }
 
-async function setAospTestAccess(env: Env, userId: number, enabled: boolean) {
-  await env.DB.batch([
-    env.DB.prepare(
-      "INSERT INTO bot_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-    ).bind(`${AOSP_TEST_ACCESS_PREFIX}${userId}`, enabled ? "1" : "0"),
-    env.DB.prepare(enabled
-      ? "DELETE FROM sessions WHERE telegram_user_id=?"
-      : "DELETE FROM sessions WHERE telegram_user_id=? AND (json_extract(data,'$.workflow')=? OR json_extract(data,'$.selectedScript')=?)"
-    ).bind(...(enabled ? [userId] : [userId, AOSP_TEST_WORKFLOW_KEY, AOSP_TEST_WORKFLOW_KEY])),
-    env.DB.prepare(enabled
-      ? "DELETE FROM workflow_bindings WHERE telegram_user_id=?"
-      : "DELETE FROM workflow_bindings WHERE telegram_user_id=? AND workflow_key=?"
-    ).bind(...(enabled ? [userId] : [userId, AOSP_TEST_WORKFLOW_KEY])),
-  ]);
-}
 async function claimSerial(env: Env, serial: string, userId: number): Promise<boolean> {
   const record = await serialRecord(env, serial);
   if (!record) return false;
@@ -588,7 +556,6 @@ async function revokeSerial(env: Env, serial: string): Promise<RevokeResult> {
     statements.push(env.DB.prepare("DELETE FROM workflow_bindings WHERE telegram_user_id=?").bind(row.owner_user_id));
     statements.push(env.DB.prepare("DELETE FROM sessions WHERE telegram_user_id=?").bind(row.owner_user_id));
     statements.push(env.DB.prepare("DELETE FROM pending_joins WHERE telegram_user_id=?").bind(row.owner_user_id));
-    statements.push(env.DB.prepare("DELETE FROM bot_state WHERE key=?").bind(`${AOSP_TEST_ACCESS_PREFIX}${row.owner_user_id}`));
   }
   await env.DB.batch(statements);
   if (row?.owner_user_id == null) return { removed: true };
@@ -705,6 +672,20 @@ async function applyBuildPreferencesMigration(env: Env): Promise<string> {
   return BUILD_PREFERENCES_MIGRATION_KEY;
 }
 
+async function applyAospMainlineMigration(env: Env): Promise<string> {
+  const marker: any = await env.DB.prepare("SELECT value FROM bot_state WHERE key=?")
+    .bind(AOSP_MAINLINE_MIGRATION_KEY).first();
+  if (marker?.value === "done") return AOSP_MAINLINE_MIGRATION_KEY;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE workflow_bindings SET workflow_key='669aosp' WHERE workflow_key='669aosp-test'"),
+    env.DB.prepare("DELETE FROM sessions WHERE CASE WHEN json_valid(data) THEN json_extract(data,'$.workflow')='669aosp-test' OR json_extract(data,'$.selectedScript')='669aosp-test' ELSE 0 END"),
+    env.DB.prepare("DELETE FROM bot_state WHERE key GLOB 'workflow_access:669aosp-test:*'"),
+    env.DB.prepare("INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .bind(AOSP_MAINLINE_MIGRATION_KEY),
+  ]);
+  return AOSP_MAINLINE_MIGRATION_KEY;
+}
+
 function beijingDayBounds(timestamp: number): [number, number] {
   const shifted = timestamp + 8 * 3600;
   const start = Math.floor(shifted / 86400) * 86400 - 8 * 3600;
@@ -736,7 +717,6 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
     const row = keys
       .filter(key => key !== "self_config" || showSelf)
       .filter(key => !AOSP_BOOL_OPTIONS.has(key) || AOSP_WORKFLOW_KEYS.has(workflowKey))
-      .filter(key => key !== "hmbird_cpuperf_fix" || workflowKey === AOSP_TEST_WORKFLOW_KEY)
       .map(key => ({
         text: `${options[key] === "true" ? "✅" : "⬜"} ${BOOL_LABELS[key]}`,
         callback_data: `set:${key}:${options[key] === "true" ? "false" : "true"}`,
@@ -835,21 +815,17 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   const jsonArgs = fields.map(() => "?, ?").join(", ");
   const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.${name}`, next]);
   params.push(now(), userId);
-  const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp','669aosp-test')"
-    : key === "hmbird_cpuperf_fix" ? " AND json_extract(data,'$.workflow')='669aosp-test'"
-    : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow') IN ('669aosp','669aosp-test')" : "";
-  const accessGuard = admin ? "" : " AND (json_extract(data,'$.workflow')!='669aosp-test' OR EXISTS (SELECT 1 FROM bot_state WHERE key=? AND value='1'))";
-  if (!admin) params.push(`${AOSP_TEST_ACCESS_PREFIX}${userId}`);
+  const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp')"
+    : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow')='669aosp'" : "";
   const menuGuard = " AND (json_extract(data,'$.menuMessageId') IS NULL OR (json_extract(data,'$.menuMessageId')=? AND json_extract(data,'$.menuChatId')=?))";
   params.push(messageId, Number(chatId));
   const result: any = await env.DB.prepare(
-    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${workflowGuard}${accessGuard}${menuGuard}`
+    `UPDATE sessions SET data=json_set(data, ${jsonArgs}),updated_at=? WHERE telegram_user_id=? AND json_type(data,'$.options')='object'${workflowGuard}${menuGuard}`
   ).bind(...params).run();
   return Number(result.meta?.changes || 0) > 0;
 }
 async function workflowMarkup(env: Env, userId: number, includeOwnerNoMount = false) {
-  const showTest = await canUseScript(env, userId, AOSP_TEST_WORKFLOW_KEY);
-  const rows = Object.entries(SCRIPTS).filter(([key]) => key !== AOSP_TEST_WORKFLOW_KEY || showTest)
+  const rows = Object.entries(SCRIPTS)
     .map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
   if (includeOwnerNoMount) rows.push([{ text: "独立 NoMount 模块（LKM）", callback_data: "owner_nomount" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
@@ -963,7 +939,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     const session: Session = { serial, options };
     if (bound) {
-      if (!SCRIPTS[bound] || !(await canUseScript(env, userId, bound))) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
+      if (!SCRIPTS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
       const variants = SCRIPTS[bound][1];
       const workflowKeys = variants ? Object.values(variants).map(([, key]) => key) : [bound];
       for (const key of workflowKeys) {
@@ -994,31 +970,18 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const session = { serial, options: await loadBuildPreferences(env, userId, true), ownerDirectedBuild: true, deliveryChatId: userId };
     await sendBuildMenu(env, userId, chatId, session, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择内核脚本，或构建独立 NoMount 模块：`, await workflowMarkup(env, userId, true)); return;
   }
-  if (command === "unbindscript" || command === "aosptest") {
+  if (command === "unbindscript") {
     if (!isAdmin(env, userId)) { await sendMessage(env, chatId, "无权使用管理员命令。"); return; }
     if (message.chat.type !== "private" || Number(chatId) !== Number(userId)) {
       await sendMessage(env, chatId, "请私聊机器人使用管理员授权命令。"); return;
     }
     const target = args[0] || "";
-    if (command === "unbindscript") {
-      if (args.length !== 1) { await sendMessage(env, chatId, "用法：/unbindscript 序列号 或 /unbindscript all"); return; }
-      const all = target.toLowerCase() === "all";
-      const owner = all ? null : await userForTarget(env, target);
-      if (!all && owner == null) { await sendMessage(env, chatId, "该序列号未绑定启用中的 Telegram 账号。"); return; }
-      const count = await unbindScripts(env, owner);
-      await sendMessage(env, chatId, `已解除${all ? "全部用户" : `用户 ${owner}`}的脚本绑定（${count} 条）。序列号、构建选项、额度和进行中的构建不变；下次 /build 需重新选择并绑定脚本。`);
-      return;
-    }
-    const mode = (args[1] || "on").toLowerCase();
-    if (!target || args.length > 2 || !["on", "off"].includes(mode)) {
-      await sendMessage(env, chatId, "用法：/aosptest 序列号或Telegram用户ID [on|off]；默认 on，授权后清除原脚本绑定。"); return;
-    }
-    const owner = await userForTarget(env, target, true);
-    if (owner == null) { await sendMessage(env, chatId, "请输入有效的 Telegram 用户 ID，或已绑定启用账号的序列号。"); return; }
-    await setAospTestAccess(env, owner, mode === "on");
-    await sendMessage(env, chatId, mode === "on"
-      ? `已向用户 ${owner} 开放 6.12.69·AOSP（风驰测试），并解除原脚本绑定。该用户仍需通过序列号、群组验证，在 /build 中选择并绑定后才能构建。`
-      : `已撤销用户 ${owner} 的 AOSP 测试授权，并清除其测试脚本绑定；其他脚本绑定和进行中的构建不变。`);
+    if (args.length !== 1) { await sendMessage(env, chatId, "用法：/unbindscript 序列号 或 /unbindscript all"); return; }
+    const all = target.toLowerCase() === "all";
+    const owner = all ? null : await userForTarget(env, target);
+    if (!all && owner == null) { await sendMessage(env, chatId, "该序列号未绑定启用中的 Telegram 账号。"); return; }
+    const count = await unbindScripts(env, owner);
+    await sendMessage(env, chatId, `已解除${all ? "全部用户" : `用户 ${owner}`}的脚本绑定（${count} 条）。序列号、构建选项、额度和进行中的构建不变；下次 /build 需重新选择并绑定脚本。`);
     return;
   }
   if (command === "allow") {
@@ -1116,9 +1079,6 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
     await clearSession(env, userId); await editMessage(env, chatId, messageId, "最终授权检查失败，未触发构建。"); return;
   }
-  if (!(await canUseScript(env, userId, workflowKey))) {
-    await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
-  }
   const boundScript = WORKFLOW_SCRIPTS[workflowKey] || workflowKey;
   if (!isAdmin(env, userId) && (await workflowForUser(env, userId)) !== boundScript) {
     await editMessage(env, chatId, messageId, "构建脚本绑定复核失败，请重新使用 /build。"); return;
@@ -1130,7 +1090,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const options = { ...selectedOptions };
   delete options.zarm_tool;
   if (!AOSP_WORKFLOW_KEYS.has(workflowKey)) for (const key of AOSP_OPTIONS) delete options[key];
-  if (workflowKey === AOSP_TEST_WORKFLOW_KEY) {
+  if (workflowKey === AOSP_WORKFLOW_KEY) {
     delete options.ccache_update;
     delete options.ccache_debug;
     options.hmbird_cpuperf_fix = options.hmbird_cpuperf_fix === "true" ? "true" : "false";
@@ -1142,7 +1102,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
   if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "服务暂不可用，请稍后重试。"); return; }
-  const ref = workflowKey === AOSP_TEST_WORKFLOW_KEY ? AOSP_TEST_REF : env.GITHUB_REF;
+  const ref = env.GITHUB_REF;
   const stored = { ...inputs, build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref };
   const created = now();
   try {
@@ -1280,9 +1240,6 @@ async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   await answerCallback(env, query.id);
   const data = query.data || "";
-  if (/^(?:kernel|variant|bind):/.test(data) && !(await canUseScript(env, userId, data.split(":")[1]))) {
-    await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
-  }
   if (data.startsWith("nomount_kernel:")) {
     const [, series, requestId] = data.split(":");
     const session = await getSession(env, userId);
@@ -1337,9 +1294,6 @@ async function handleCallback(env: Env, update: any) {
     await editMessage(env, chatId, messageId, "该菜单已失效，请使用最新的构建菜单。"); return;
   }
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
-  if (!(await canUseScript(env, userId, session.workflow || session.selectedScript || ""))) {
-    await editMessage(env, chatId, messageId, "该构建入口尚未向你开放，请联系管理员。"); return;
-  }
   if (data === "back:scripts") {
     delete session.workflow; delete session.selectedScript; session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     if (!isAdmin(env, userId)) {
@@ -1432,7 +1386,6 @@ async function handleCallback(env: Env, update: any) {
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
     if (AOSP_BOOL_OPTIONS.has(key) && !AOSP_WORKFLOW_KEYS.has(session.workflow || "")) return;
-    if (key === "hmbird_cpuperf_fix" && session.workflow !== AOSP_TEST_WORKFLOW_KEY) return;
     if (key === "self_config" && !isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "该配置仅限所有者使用。"); return; }
     const value = options[key] === "true" ? "false" : "true";
     options[key] = value;
@@ -1820,9 +1773,10 @@ export default {
     const quotaMigration = await applyQuotaMigration(env);
     const chatHistoryMigration = await applyChatHistoryMigration(env);
     const buildPreferencesMigration = await applyBuildPreferencesMigration(env);
+    const aospMainlineMigration = await applyAospMainlineMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospTestAccess: "admin-or-grant" });
+      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, aospMainlineMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;
@@ -1851,6 +1805,7 @@ export default {
       await applyQuotaMigration(env);
       await applyChatHistoryMigration(env);
       await applyBuildPreferencesMigration(env);
+      await applyAospMainlineMigration(env);
       await monitorBuilds(env);
     })());
   },
