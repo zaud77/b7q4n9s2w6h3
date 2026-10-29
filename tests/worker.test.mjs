@@ -662,7 +662,7 @@ test("mainline migration removes test grants and preserves normal identity, quot
     database.prepare("INSERT INTO bot_state VALUES(?,?)").run(key, value);
   await worker.applyAospMainlineMigration(env);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM bot_state WHERE key GLOB 'workflow_access:669aosp-test:*'").get().count, 0);
-  assert.deepEqual({ ...database.prepare("SELECT workflow_key,bound_at FROM workflow_bindings WHERE telegram_user_id=42").get() }, { workflow_key: "669aosp", bound_at: timestamp });
+  assert.equal(database.prepare("SELECT workflow_key,bound_at FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
   assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=99").get().workflow_key, "623");
   assert.deepEqual(database.prepare("SELECT telegram_user_id FROM sessions ORDER BY telegram_user_id").all().map(row => row.telegram_user_id), [99, 101]);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM serial_bindings").get().count, 1);

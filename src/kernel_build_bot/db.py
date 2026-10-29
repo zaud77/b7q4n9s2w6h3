@@ -8,7 +8,7 @@ import sqlite3
 import time
 
 WORKFLOW_BINDING_MIGRATION = "migration:explicit-workflow-binding-v2"
-AOSP_MAINLINE_MIGRATION = "migration:aosp-mainline-v1"
+AOSP_MAINLINE_MIGRATION = "migration:aosp-mainline-v2"
 
 
 class Database:
@@ -120,7 +120,7 @@ class Database:
                 )
             migration = db.execute("SELECT value FROM bot_state WHERE key=?", (AOSP_MAINLINE_MIGRATION,)).fetchone()
             if migration is None:
-                db.execute("UPDATE workflow_bindings SET workflow_key='669aosp' WHERE workflow_key='669aosp-test'")
+                db.execute("DELETE FROM workflow_bindings WHERE workflow_key='669aosp-test'")
                 db.execute("DELETE FROM bot_state WHERE key GLOB 'workflow_access:669aosp-test:*'")
                 db.execute("INSERT INTO bot_state(key,value) VALUES(?, 'done')", (AOSP_MAINLINE_MIGRATION,))
 

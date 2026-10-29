@@ -185,11 +185,11 @@ def test_mainline_migration_preserves_normal_identity_preferences_and_jobs(tmp_p
     db.save_build_preferences(42, {"qpace_enable": "true"})
     db.create_build_job("running-job", 42, 42, "kernel.yml")
     with db._connect() as connection:
-        connection.execute("DELETE FROM bot_state WHERE key='migration:aosp-mainline-v1'")
+        connection.execute("DELETE FROM bot_state WHERE key='migration:aosp-mainline-v2'")
         connection.execute("INSERT INTO bot_state VALUES('workflow_access:669aosp-test:42','1')")
         connection.execute("INSERT INTO bot_state VALUES('quota_count_failures:42','1')")
     db = Database(path, "test-pepper")
-    assert db.workflow_for_user(42) == "669aosp"
+    assert db.workflow_for_user(42) is None
     assert db.workflow_for_user(99) == "623"
     assert db.serial_for_user(42) == "TEST_DEVICE_123"
     assert db.get_build_preferences(42) == {"qpace_enable": "true"}
@@ -198,7 +198,7 @@ def test_mainline_migration_preserves_normal_identity_preferences_and_jobs(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM bot_state WHERE key GLOB 'workflow_access:669aosp-test:*'").fetchone()[0] == 0
         assert connection.execute("SELECT value FROM bot_state WHERE key='quota_count_failures:42'").fetchone()[0] == "1"
     db = Database(path, "test-pepper")
-    assert db.unbind_workflows(42) == [42]
+    assert db.unbind_workflows(42) == []
     assert db.unbind_workflows() == [99]
     assert db.has_active_build_job(42)
     assert db.serial_for_user(42) == "TEST_DEVICE_123"

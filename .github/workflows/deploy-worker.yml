@@ -47,7 +47,7 @@ jobs:
               and .commandMenus == "commands:scoped-menus-v8"
               and .nomountKernelSeries == ["6.12", "6.18"]
               and .adminParallelBuilds == true
-              and .aospMainlineMigration == "migration:aosp-mainline-v1"
+              and .aospMainlineMigration == "migration:aosp-mainline-v2"
               and .aospMainline == true
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true

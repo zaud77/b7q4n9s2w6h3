@@ -43,7 +43,7 @@ const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
 const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
 const COMMAND_MENU_REVISION = "commands:scoped-menus-v8";
-const AOSP_MAINLINE_MIGRATION_KEY = "migration:aosp-mainline-v1";
+const AOSP_MAINLINE_MIGRATION_KEY = "migration:aosp-mainline-v2";
 const UNVERIFIED_COMMANDS = [
   { command: "start", description: "验证序列号" },
   { command: "join", description: "验证序列号并申请入群" },
@@ -677,7 +677,7 @@ async function applyAospMainlineMigration(env: Env): Promise<string> {
     .bind(AOSP_MAINLINE_MIGRATION_KEY).first();
   if (marker?.value === "done") return AOSP_MAINLINE_MIGRATION_KEY;
   await env.DB.batch([
-    env.DB.prepare("UPDATE workflow_bindings SET workflow_key='669aosp' WHERE workflow_key='669aosp-test'"),
+    env.DB.prepare("DELETE FROM workflow_bindings WHERE workflow_key='669aosp-test'"),
     env.DB.prepare("DELETE FROM sessions WHERE CASE WHEN json_valid(data) THEN json_extract(data,'$.workflow')='669aosp-test' OR json_extract(data,'$.selectedScript')='669aosp-test' ELSE 0 END"),
     env.DB.prepare("DELETE FROM bot_state WHERE key GLOB 'workflow_access:669aosp-test:*'"),
     env.DB.prepare("INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
