@@ -127,9 +127,10 @@ const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
 };
 
 const BOOL_LABELS: Record<string, string> = {
-  zram_writeback_enable: "独立回写（实验）",
-  qpace_enable: "QPaCE（实验）",
-  hmbird_cpuperf_fix: "风驰 CPUPerf 时钟修复（实验）",
+  zram_writeback_enable: "独立回写",
+  qpace_enable: "QPaCE",
+  hmbird_cpuperf_fix: "风驰 CPUPerf 时钟修复",
+  ntsync_enable: "NTSYNC",
   self_config: "自用配置",
   susfs_enable: "SUSFS",
   nomount_enable: "NoMount",
@@ -144,7 +145,7 @@ const BOOL_LABELS: Record<string, string> = {
 };
 const BOOL_OPTION_ROWS = [
   ["zram_writeback_enable", "qpace_enable"],
-  ["hmbird_cpuperf_fix"],
+  ["hmbird_cpuperf_fix", "ntsync_enable"],
   ["susfs_enable", "nomount_enable"],
   ["kpm_enable", "lz4_enable"],
   ["lz4kd_enable", "unicode_enable"],
@@ -735,7 +736,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
     callback_data: `set:zram_size_gib:${nextValue(ZRAM_SIZE_VALUES, options.zram_size_gib || "default")}`,
   }]);
   rows.push([
-    { text: `BBR：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: `set:bbr_enable:${nextValue(["false", "true", "default"], options.bbr_enable)}` },
+    { text: `BBR3：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: `set:bbr_enable:${nextValue(["false", "true", "default"], options.bbr_enable)}` },
     { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: `set:droidspaces_enable:${nextValue(["false", "standard", "extend"], options.droidspaces_enable)}` },
   ]);
   rows.push([{ text: "⬅️ 上一步", callback_data: "back:variant" }, { text: "取消", callback_data: "cancel" }]);
@@ -775,7 +776,7 @@ function optimisticOptionsMarkup(query: any, data: string): any | null {
     };
     if (values[option]?.includes(next)) {
       const prefixes: Record<string, string> = {
-        bbr_enable: "BBR", droidspaces_enable: "Droidspaces",
+        bbr_enable: "BBR3", droidspaces_enable: "Droidspaces",
         zram_default_algorithm: "默认 ZRAM", zram_size_gib: "ZRAM 大小",
       };
       target.text = `${prefixes[option]}：${cycleLabels[option][next]}`;
@@ -1776,7 +1777,17 @@ export default {
     const aospMainlineMigration = await applyAospMainlineMigration(env);
     if (request.method === "GET" && url.pathname === "/health") {
       const commandMenus = await syncCommandMenus(env);
-      return Response.json({ ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration, buildPreferencesMigration, aospMainlineMigration, commandMenus, nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS), kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN), privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY), kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO, dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)), quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true });
+      return Response.json({
+        ok: true, service: "oneplus-gki-build-bot", dataMigration, quotaMigration, chatHistoryMigration,
+        buildPreferencesMigration, aospMainlineMigration, commandMenus,
+        nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS),
+        kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN),
+        privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY),
+        kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO,
+        dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)),
+        quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true,
+        ntsyncSelectable: Boolean(BOOL_LABELS.ntsync_enable), bbrVersion: 3,
+      });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {
       const webhookUrl = `${url.origin}/telegram/${env.WEBHOOK_SECRET}`;

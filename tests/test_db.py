@@ -278,7 +278,8 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     assert any("上一步" in label for label in public_labels)
     assert not any("zarm" in label.lower() for label in owner_labels)
     public_rows = [[button.text for button in row] for row in public_markup.inline_keyboard]
-    assert public_rows[:5] == [
+    assert public_rows[:6] == [
+        ["⬜ NTSYNC"],
         ["⬜ SUSFS", "⬜ NoMount"],
         ["⬜ KPM / KPatch Next", "✅ LZ4 + Zstd"],
         ["⬜ LZ4KD", "✅ Unicode 修复"],
@@ -288,6 +289,21 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
     assert public_rows[-2] == ["⬅️ 上一步", "取消"]
     assert public_rows[-1] == ["🚀 开始构建"]
     assert [[button.text for button in row] for row in variant_markup("623").inline_keyboard[:2]] == [["金标"], ["紫标"]]
+
+
+def test_ntsync_is_independent_and_feature_names_have_no_experimental_suffix():
+    assert defaults()["ntsync_enable"] == "false"
+    for enabled in ("true", "false"):
+        options = build_options_with_preferences({"ntsync_enable": enabled, "droidspaces_enable": "standard"}, False)
+        assert options["ntsync_enable"] == enabled
+        assert options["droidspaces_enable"] == "standard"
+    assert build_options_with_preferences({"ntsync_enable": True}, False)["ntsync_enable"] == "false"
+    for workflow in ("623g", "669aosp"):
+        menu = KernelBuildBot.options_markup(None, defaults(), False, workflow)
+        buttons = [button for row in menu.inline_keyboard for button in row]
+        assert any(button.callback_data == "set:ntsync_enable:true" for button in buttons)
+        assert any("BBR3" in button.text for button in buttons)
+        assert all("实验" not in button.text for button in buttons)
     assert "SUSFS 与 NoMount 自动互斥" in options_prompt("623g")
 
 

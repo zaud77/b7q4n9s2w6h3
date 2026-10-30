@@ -49,6 +49,8 @@ jobs:
               and .adminParallelBuilds == true
               and .aospMainlineMigration == "migration:aosp-mainline-v2"
               and .aospMainline == true
+              and .ntsyncSelectable == true
+              and .bbrVersion == 3
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
               and .privateBuildsReady == true

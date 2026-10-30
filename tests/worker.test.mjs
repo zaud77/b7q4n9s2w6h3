@@ -741,6 +741,30 @@ test("BakaSU is the default kernel manager and old ReSukiSU preferences migrate"
   assert.equal(worker.normalizeBuildOptions({ ksu_type: "resukisu" }, true).ksu_type, "bakasu");
 });
 
+test("NTSYNC defaults off and remains independent of DroidSpaces preferences", () => {
+  assert.equal(worker.normalizeBuildOptions({}, false).ntsync_enable, "false");
+  for (const value of ["true", "false"]) {
+    const options = worker.normalizeBuildOptions({ ntsync_enable: value, droidspaces_enable: "standard" }, false);
+    assert.equal(options.ntsync_enable, value);
+    assert.equal(options.droidspaces_enable, "standard");
+  }
+  assert.equal(worker.normalizeBuildOptions({ ntsync_enable: true }, false).ntsync_enable, "false");
+});
+
+for (const workflow of ["623g", "669aosp"]) {
+  test(`NTSYNC selection is sent unchanged for ${workflow}`, async t => {
+    const { env, state } = await fixture(t, { workflowBinding: workflow === "623g" ? "623" : workflow });
+    const draft = kernelSession();
+    draft.workflow = workflow;
+    draft.options = worker.normalizeBuildOptions({ ntsync_enable: "true", droidspaces_enable: "false" }, false);
+    await worker.dispatchBuild(env, query, draft);
+    assert.equal(dispatches(state).length, 1);
+    assert.equal(dispatches(state)[0].body.inputs.ntsync_enable, "true");
+    assert.equal(dispatches(state)[0].body.inputs.droidspaces_enable, "false");
+    assertPrivateMessages(state);
+  });
+}
+
 test("FinaSU is retained in preferences and dispatched with NoMount", async t => {
   assert.equal(worker.normalizeBuildOptions({ ksu_type: "finasu" }, false).ksu_type, "finasu");
   const { env, state } = await fixture(t);
@@ -1060,6 +1084,8 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(body.nomountRepository, "zaud77/m8v3p6r9x2k4");
   assert.equal(body.kernelBuildsReady, true);
   assert.equal(body.nomountBuildsReady, true);
+  assert.equal(body.ntsyncSelectable, true);
+  assert.equal(body.bbrVersion, 3);
   assert.equal(body.privateBuildsReady, false);
   assert.deepEqual(body.nomountKernelSeries, ["6.12", "6.18"]);
   assert.equal(body.dailyBuildLimit, 2);
@@ -1071,6 +1097,8 @@ test("health reports deployed repository bindings without exposing credentials",
   const revision = source.match(/const COMMAND_MENU_REVISION = "([^"]+)";/)[1];
   assert.ok(deploy.includes(`and .commandMenus == "${revision}"`));
   assert.ok(deploy.includes('and .nomountKernelSeries == ["6.12", "6.18"]'));
+  assert.ok(deploy.includes('and .ntsyncSelectable == true'));
+  assert.ok(deploy.includes('and .bbrVersion == 3'));
   Object.assign(env, { PRIVATE_BUILD_TOKEN: "private-fixture-token", PRIVATE_KERNEL_REPOSITORY: "private/kernel", PRIVATE_LKM_REPOSITORY: "private/lkm" });
   const configured = await (await worker.default.fetch(new Request("https://fixture.invalid/health"), env, {})).json();
   assert.equal(configured.privateBuildsReady, true);

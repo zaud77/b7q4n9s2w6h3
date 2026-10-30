@@ -107,9 +107,10 @@ LEGACY_WORKFLOW_KEYS = {
 
 
 BOOL_LABELS = {
-    "zram_writeback_enable": "独立回写（实验）",
-    "qpace_enable": "QPaCE（实验）",
-    "hmbird_cpuperf_fix": "风驰 CPUPerf 时钟修复（实验）",
+    "zram_writeback_enable": "独立回写",
+    "qpace_enable": "QPaCE",
+    "hmbird_cpuperf_fix": "风驰 CPUPerf 时钟修复",
+    "ntsync_enable": "NTSYNC",
     "self_config": "自用配置",
     "susfs_enable": "SUSFS",
     "nomount_enable": "NoMount",
@@ -124,7 +125,7 @@ BOOL_LABELS = {
 }
 BOOL_OPTION_ROWS = (
     ("zram_writeback_enable", "qpace_enable"),
-    ("hmbird_cpuperf_fix",),
+    ("hmbird_cpuperf_fix", "ntsync_enable"),
     ("susfs_enable", "nomount_enable"),
     ("kpm_enable", "lz4_enable"),
     ("lz4kd_enable", "unicode_enable"),
@@ -656,7 +657,7 @@ class KernelBuildBot:
             [
                 [InlineKeyboardButton(f"KernelSU：{KSU_LABELS[options['ksu_type']]}", callback_data=f"set:ksu_type:{ksu_next}")],
                 [
-                    InlineKeyboardButton(f"BBR：{bbr_label}", callback_data=f"set:bbr_enable:{bbr_next}"),
+                    InlineKeyboardButton(f"BBR3：{bbr_label}", callback_data=f"set:bbr_enable:{bbr_next}"),
                     InlineKeyboardButton(f"Droidspaces：{droid_label}", callback_data=f"set:droidspaces_enable:{droid_next}"),
                 ],
                 [InlineKeyboardButton("⬅️ 上一步", callback_data="back:variant"), InlineKeyboardButton("取消", callback_data="cancel")],
