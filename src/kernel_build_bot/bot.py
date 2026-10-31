@@ -312,15 +312,36 @@ class KernelBuildBot:
             ChatMemberStatus.MEMBER,
             ChatMemberStatus.ADMINISTRATOR,
             ChatMemberStatus.OWNER,
-        }
+        } or (member.status == ChatMemberStatus.RESTRICTED and getattr(member, "is_member", False) is True)
 
     async def create_join_request_invite(self, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+        serial = self.db.serial_for_user(user_id)
+        if not serial or not self.db.serial_is_allowed(serial):
+            raise ValueError("Join invite requires an enabled bound serial")
+        member = await context.bot.get_chat_member(self.settings.required_channel_id, user_id)
+        if member.status == ChatMemberStatus.BANNED:
+            await context.bot.unban_chat_member(
+                self.settings.required_channel_id, user_id, only_if_banned=True
+            )
         invite = await context.bot.create_chat_invite_link(
             self.settings.required_channel_id,
             name=f"verified-{user_id}-{int(time.time())}",
             creates_join_request=True,
         )
         return invite.invite_link
+
+    async def send_join_request_invite(
+        self, context: ContextTypes.DEFAULT_TYPE, update: Update, user_id: int, text: str
+    ) -> None:
+        try:
+            invite_link = await self.create_join_request_invite(context, user_id)
+        except Exception:
+            logging.exception("failed to restore join access or create invite")
+            await update.effective_message.reply_text(
+                "序列号已绑定，但无法恢复入群权限或生成邀请。请联系管理员检查群组移除限制，然后使用 /start 重试。"
+            )
+            return
+        await update.effective_message.reply_text(f"{text}\n{invite_link}")
 
     async def sync_user_commands(self, context: ContextTypes.DEFAULT_TYPE, user_id: int, bound: bool) -> None:
         if self.is_admin(user_id):
@@ -459,9 +480,8 @@ class KernelBuildBot:
         if bound_serial:
             context.user_data.clear()
             await self.sync_user_commands(context, user.id, True)
-            invite_link = await self.create_join_request_invite(context, user.id)
-            await update.effective_message.reply_text(
-                f"序列号已绑定。请使用以下链接申请进入群组，机器人会自动批准：\n{invite_link}"
+            await self.send_join_request_invite(
+                context, update, user.id, "序列号已绑定。请使用以下链接申请进入群组，机器人会自动批准："
             )
         else:
             context.user_data.clear()
@@ -485,6 +505,22 @@ class KernelBuildBot:
                 request.user_chat_id, "当前正在构建内核，请等待本次构建完成后重新申请。"
             )
             return
+        bound_serial = self.db.serial_for_user(request.from_user.id)
+        if bound_serial and self.db.serial_is_allowed(bound_serial):
+            try:
+                await context.bot.approve_chat_join_request(
+                    self.settings.required_channel_id, request.from_user.id
+                )
+            except Exception:
+                logging.exception("failed to approve bound user join request")
+            else:
+                self.db.clear_pending_join(request.from_user.id)
+                context.user_data.clear()
+                await self.sync_user_commands(context, request.from_user.id, True)
+                await context.bot.send_message(
+                    request.user_chat_id, "序列号验证通过，已批准进入频道。加入后可使用 /build。"
+                )
+                return
         self.db.set_pending_join(request.from_user.id, request.user_chat_id)
         context.user_data.clear()
         context.user_data["awaiting_join_serial"] = True
@@ -619,8 +655,10 @@ class KernelBuildBot:
                 await update.effective_message.reply_text("序列号已绑定，频道成员身份验证通过，可使用 /build。")
                 return
             if not pending:
-                await update.effective_message.reply_text(
-                    "序列号验证通过。请先打开管理员发送的频道申请链接并提交加入请求，机器人收到后会自动验证。"
+                context.user_data.clear()
+                await self.send_join_request_invite(
+                    context, update, user_id,
+                    "序列号验证通过。请使用以下链接提交频道加入申请，机器人会自动批准："
                 )
                 return
             try:
@@ -1317,11 +1355,10 @@ class KernelBuildBot:
             )
             return
         try:
-            await context.bot.ban_chat_member(self.settings.required_channel_id, owner_user_id)
             await context.bot.unban_chat_member(
                 self.settings.required_channel_id,
                 owner_user_id,
-                only_if_banned=True,
+                only_if_banned=False,
             )
         except Exception:
             logging.exception("failed to remove revoked user %s from group", owner_user_id)

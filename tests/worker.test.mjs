@@ -11,7 +11,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, handleCallback, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration };";
+  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -69,6 +69,7 @@ async function fixture(t, overrides = {}) {
     const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
     state.calls.push({ url: String(url), options, body });
     if (String(url).includes("api.telegram.org")) {
+      if (state.telegramResponse) return state.telegramResponse(String(url).split("/").at(-1), body);
       const result = String(url).endsWith("getChatMember") ? { status: state.member ? "member" : "left" } : { chat: { type: "private", id: 42 }, message_id: state.messageId || 8 };
       return Response.json({ ok: true, result });
     }
@@ -126,6 +127,140 @@ async function quotaFixture(t) {
       .run(`quota_count_failures:${userId}`, enabled ? "1" : "0");
   }
   return { env, state, database, timestamp, addJob, countFailures };
+}
+
+async function accessFixture(t, status = "member") {
+  const result = await quotaFixture(t);
+  const { env, state } = result;
+  env.REQUIRED_CHANNEL_ID = "-10012345";
+  state.channelStatus = status;
+  state.unbanFailures = 0;
+  const records = new Map();
+  records.set(`serial:${await worker.digestSerial(env, serial)}`, JSON.stringify({ serial, enabled: true }));
+  env.SERIALS = {
+    async get(key, type) {
+      const value = records.get(key);
+      return value == null ? null : type === "json" ? JSON.parse(value) : value;
+    },
+    async put(key, value) { records.set(key, value); },
+    async delete(key) { records.delete(key); },
+  };
+  state.telegramResponse = async (method, body) => {
+    let response = true;
+    if (method === "getChatMember") response = { status: state.channelStatus, is_member: state.restrictedMember === true };
+    if (method === "banChatMember") state.channelStatus = "kicked";
+    if (method === "unbanChatMember") {
+      if (state.unbanFailures > 0) {
+        state.unbanFailures--;
+        return Response.json({ ok: false, description: "temporary unban failure" }, { status: 503 });
+      }
+      if (!body.only_if_banned || state.channelStatus === "kicked") state.channelStatus = "left";
+    }
+    if (method === "createChatInviteLink") response = { invite_link: "https://t.me/+fixture", creates_join_request: true };
+    if (method === "approveChatJoinRequest") {
+      if (state.channelStatus === "kicked") return Response.json({ ok: false, description: "USER_BANNED_IN_CHANNEL" }, { status: 400 });
+      state.channelStatus = "member";
+    }
+    if (method === "sendMessage") response = { chat: { type: "private", id: Number(body.chat_id) }, message_id: 8 };
+    return Response.json({ ok: true, result: response });
+  };
+  return { ...result, records };
+}
+
+const accessUpdate = userId => ({ message: { from: { id: userId }, chat: { id: userId, type: "private" } } });
+
+test("serial revocation and a new binding allow the same user to rejoin and open a build menu", async t => {
+  const { env, state, database, timestamp, addJob } = await accessFixture(t);
+  addJob({ status: "sent", succeededAt: timestamp - 5 });
+  database.prepare("INSERT INTO quota_resets VALUES(?,?)").run(42, timestamp - 60);
+  database.prepare("INSERT INTO user_build_preferences VALUES(?,?,?)").run(42, '{"ntsync_enable":"true"}', timestamp);
+  database.prepare("INSERT INTO workflow_bindings VALUES(?,?,?)").run(99, "669aosp", timestamp);
+  database.prepare("INSERT INTO sessions VALUES(?,?,?)").run(42, '{"workflow":"623g"}', timestamp);
+  database.prepare("INSERT INTO pending_joins VALUES(?,?,?)").run(42, 4200, timestamp);
+  await worker.handleCommand(env, accessUpdate(1), "revoke", [serial]);
+  assert.equal(state.channelStatus, "left");
+  assert.equal(state.calls.filter(call => call.url.endsWith("/banChatMember")).length, 0);
+  assert.equal(state.calls.find(call => call.url.endsWith("/unbanChatMember")).body.only_if_banned, false);
+  assert.equal(database.prepare("SELECT * FROM workflow_bindings WHERE telegram_user_id=42").get(), undefined);
+  assert.equal(database.prepare("SELECT * FROM pending_joins WHERE telegram_user_id=42").get(), undefined);
+  const replacement = "TEST_REBOUND_456";
+  await worker.handleCommand(env, accessUpdate(1), "allow", [replacement]);
+  await worker.handleCommand(env, accessUpdate(42), "start", []);
+  await worker.handleText(env, { message: { ...accessUpdate(42).message, text: replacement } });
+  assert.equal(database.prepare("SELECT serial_value FROM serial_bindings WHERE owner_user_id=42").get().serial_value, replacement);
+  await worker.handleJoinRequest(env, { chat_join_request: { from: { id: 42 }, chat: { id: env.REQUIRED_CHANNEL_ID }, user_chat_id: 4200 } });
+  assert.equal(state.channelStatus, "member");
+  await worker.handleCommand(env, accessUpdate(42), "build", []);
+  assert.match(state.calls.at(-1).body.text, /首次构建/);
+  assert.equal(database.prepare("SELECT COUNT(*) AS total FROM build_jobs").get().total, 1);
+  assert.equal(database.prepare("SELECT reset_at FROM quota_resets WHERE telegram_user_id=42").get().reset_at, timestamp - 60);
+  assert.equal(database.prepare("SELECT options FROM user_build_preferences WHERE telegram_user_id=42").get().options, '{"ntsync_enable":"true"}');
+  assert.equal(database.prepare("SELECT workflow_key FROM workflow_bindings WHERE telegram_user_id=99").get().workflow_key, "669aosp");
+  assert.equal(dispatches(state).length, 0);
+  assertPrivateMessages(state);
+});
+
+test("a failed revocation request cannot leave a newly created Telegram ban", async t => {
+  const { env, state, database } = await accessFixture(t);
+  state.unbanFailures = 1;
+  await worker.handleCommand(env, accessUpdate(1), "revoke", [serial]);
+  assert.equal(state.channelStatus, "member");
+  assert.equal(database.prepare("SELECT * FROM serial_bindings WHERE owner_user_id=42").get(), undefined);
+  assert.equal(state.calls.filter(call => call.url.endsWith("/banChatMember")).length, 0);
+  assert.match(state.calls.at(-1).body.text, /移出群组失败/);
+});
+
+test("an enabled bound user recovers a lingering ban before receiving a new invitation", async t => {
+  const { env, state } = await accessFixture(t, "kicked");
+  await worker.handleCommand(env, accessUpdate(42), "start", []);
+  assert.equal(state.channelStatus, "left");
+  const unban = state.calls.findIndex(call => call.url.endsWith("/unbanChatMember"));
+  const invite = state.calls.findIndex(call => call.url.endsWith("/createChatInviteLink"));
+  assert.ok(unban >= 0 && invite > unban);
+  assert.equal(state.calls[unban].body.user_id, 42);
+  assert.equal(state.calls[unban].body.only_if_banned, true);
+  assert.match(state.calls.at(-1).body.text, /https:\/\/t\.me\/\+fixture/);
+  assert.equal(state.calls[invite].body.creates_join_request, true);
+  assert.equal(state.calls[invite].body.expire_date, undefined);
+});
+
+test("an unban failure preserves binding and does not issue another unusable invitation", async t => {
+  const { env, state, database } = await accessFixture(t, "kicked");
+  state.unbanFailures = 1;
+  await worker.handleCommand(env, accessUpdate(42), "start", []);
+  assert.equal(state.channelStatus, "kicked");
+  assert.ok(!state.calls.some(call => call.url.endsWith("/createChatInviteLink")));
+  assert.match(state.calls.at(-1).body.text, /无法恢复入群权限/);
+  assert.equal(database.prepare("SELECT serial_value FROM serial_bindings WHERE owner_user_id=42").get().serial_value, serial);
+});
+
+test("a bound user who already left receives an invitation without another removal", async t => {
+  const { env, state } = await accessFixture(t, "left");
+  await worker.handleCommand(env, accessUpdate(42), "start", []);
+  assert.ok(!state.calls.some(call => /\/(?:ban|unban)ChatMember$/.test(call.url)));
+  assert.ok(state.calls.some(call => call.url.endsWith("/createChatInviteLink")));
+});
+
+for (const allowed of [false, true]) {
+  test(`a missing enabled owned binding cannot restore group access (record enabled=${allowed})`, async t => {
+    const { env, state, database, records } = await accessFixture(t, "kicked");
+    if (allowed) database.prepare("UPDATE serial_bindings SET owner_user_id=99").run();
+    else records.clear();
+    await worker.handleCommand(env, accessUpdate(42), "start", []);
+    assert.ok(!state.calls.some(call => /\/(?:unbanChatMember|createChatInviteLink)$/.test(call.url)));
+    assert.equal(state.channelStatus, "kicked");
+  });
+}
+
+for (const present of [true, false]) {
+  test(`restricted chat members retain their actual membership (is_member=${present})`, async t => {
+    const { env, state } = await accessFixture(t, "restricted");
+    state.restrictedMember = present;
+    await worker.handleCommand(env, accessUpdate(42), "build", []);
+    if (present) assert.doesNotMatch(state.calls.at(-1).body.text, /尚未通过入群验证/);
+    else assert.match(state.calls.at(-1).body.text, /尚未通过入群验证/);
+    assert.ok(!state.calls.some(call => /\/(?:ban|unban)ChatMember$/.test(call.url)));
+  });
 }
 
 function dispatches(state) { return state.calls.filter(call => call.url.endsWith("/dispatches")); }
@@ -1086,6 +1221,7 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(body.nomountBuildsReady, true);
   assert.equal(body.ntsyncSelectable, true);
   assert.equal(body.bbrVersion, 3);
+  assert.equal(body.serialRebindRecovery, true);
   assert.equal(body.privateBuildsReady, false);
   assert.deepEqual(body.nomountKernelSeries, ["6.12", "6.18"]);
   assert.equal(body.dailyBuildLimit, 2);
@@ -1099,6 +1235,7 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.ok(deploy.includes('and .nomountKernelSeries == ["6.12", "6.18"]'));
   assert.ok(deploy.includes('and .ntsyncSelectable == true'));
   assert.ok(deploy.includes('and .bbrVersion == 3'));
+  assert.ok(deploy.includes('and .serialRebindRecovery == true'));
   Object.assign(env, { PRIVATE_BUILD_TOKEN: "private-fixture-token", PRIVATE_KERNEL_REPOSITORY: "private/kernel", PRIVATE_LKM_REPOSITORY: "private/lkm" });
   const configured = await (await worker.default.fetch(new Request("https://fixture.invalid/health"), env, {})).json();
   assert.equal(configured.privateBuildsReady, true);

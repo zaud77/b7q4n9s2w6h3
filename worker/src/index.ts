@@ -428,17 +428,38 @@ async function activeBuild(env: Env, userId: number): Promise<boolean> {
 async function isMember(env: Env, userId: number): Promise<boolean> {
   try {
     const member = await tg(env, "getChatMember", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId });
-    return ["member", "administrator", "creator"].includes(member.status);
+    return ["member", "administrator", "creator"].includes(member.status)
+      || (member.status === "restricted" && member.is_member === true);
   } catch { return false; }
 }
 
 async function createJoinRequestInvite(env: Env, userId: number): Promise<string> {
+  const serial = await serialForUser(env, userId);
+  if (!serial || !(await serialRecord(env, serial))) throw new Error("Join invite requires an enabled bound serial");
+  const member = await tg(env, "getChatMember", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId });
+  if (member.status === "kicked") {
+    await tg(env, "unbanChatMember", {
+      chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId, only_if_banned: true,
+    });
+  }
   const invite = await tg(env, "createChatInviteLink", {
     chat_id: env.REQUIRED_CHANNEL_ID,
     name: `verified-${userId}-${now()}`,
     creates_join_request: true,
   });
   return invite.invite_link;
+}
+
+async function sendJoinRequestInvite(env: Env, userId: number, chatId: number | string, text: string) {
+  let inviteLink: string;
+  try {
+    inviteLink = await createJoinRequestInvite(env, userId);
+  } catch (error) {
+    console.error("restore join access or create invite failed", userId, String(error));
+    await sendMessage(env, chatId, "序列号已绑定，但无法恢复入群权限或生成邀请。请联系管理员检查群组移除限制，然后使用 /start 重试。");
+    return;
+  }
+  await sendMessage(env, chatId, `${text}\n${inviteLink}`);
 }
 
 async function recoverJoinApproval(
@@ -529,11 +550,10 @@ async function removeRevokedUserAccess(env: Env, userId: number): Promise<boolea
   const commandsReset = await setUserCommands(env, userId, false);
   if (isAdmin(env, userId)) return commandsReset;
   try {
-    await tg(env, "banChatMember", { chat_id: env.REQUIRED_CHANNEL_ID, user_id: userId });
     await tg(env, "unbanChatMember", {
       chat_id: env.REQUIRED_CHANNEL_ID,
       user_id: userId,
-      only_if_banned: true,
+      only_if_banned: false,
     });
     return commandsReset;
   } catch (error) {
@@ -899,8 +919,8 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     if (boundSerial) {
       await clearSession(env, userId);
       await setUserCommands(env, userId, true);
-      const inviteLink = await createJoinRequestInvite(env, userId);
-      await sendMessage(env, chatId, `序列号已绑定。请使用以下链接申请进入群组，机器人会自动批准：\n${inviteLink}`);
+      await sendJoinRequestInvite(env, userId, chatId, "序列号已绑定。请使用以下链接申请进入群组，机器人会自动批准：");
+      return;
     } else {
       await setSession(env, userId, { awaitingJoinSerial: true });
       await setUserCommands(env, userId, false);
@@ -1068,8 +1088,7 @@ async function handleText(env: Env, update: any) {
   await clearSession(env, userId);
   if (await isMember(env, userId)) await sendMessage(env, message.chat.id, "序列号已绑定，频道成员身份验证通过，可使用 /build。");
   else {
-    const inviteLink = await createJoinRequestInvite(env, userId);
-    await sendMessage(env, message.chat.id, `序列号验证通过。请使用以下链接提交频道加入申请，机器人会自动批准：\n${inviteLink}`);
+    await sendJoinRequestInvite(env, userId, message.chat.id, "序列号验证通过。请使用以下链接提交频道加入申请，机器人会自动批准：");
   }
 }
 
@@ -1786,7 +1805,7 @@ export default {
         kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO,
         dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)),
         quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true,
-        ntsyncSelectable: Boolean(BOOL_LABELS.ntsync_enable), bbrVersion: 3,
+        ntsyncSelectable: Boolean(BOOL_LABELS.ntsync_enable), bbrVersion: 3, serialRebindRecovery: true,
       });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {

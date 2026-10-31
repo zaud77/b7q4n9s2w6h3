@@ -1,3 +1,10 @@
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from telegram.constants import ChatMemberStatus
+
 from kernel_build_bot.db import Database, WORKFLOW_BINDING_MIGRATION
 from kernel_build_bot.config import Settings
 from kernel_build_bot.bot import (
@@ -409,3 +416,123 @@ def test_dispatch_quota_is_enforced_only_for_regular_users():
         asyncio.run(bot.dispatch(query, context))
         assert len(messages) == 1
         assert ("请重新选择构建配置" if admin else "2 次构建上限") in messages[0]
+
+
+@pytest.fixture
+def group_access(tmp_path):
+    bot = KernelBuildBot.__new__(KernelBuildBot)
+    bot.settings = SimpleNamespace(admin_user_ids={1}, required_channel_id=-10012345)
+    bot.db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    bot.db.allow_serial("TEST_DEVICE_123", 42, 1)
+    api = SimpleNamespace(
+        get_chat_member=AsyncMock(return_value=SimpleNamespace(status=ChatMemberStatus.LEFT)),
+        unban_chat_member=AsyncMock(return_value=True),
+        ban_chat_member=AsyncMock(return_value=True),
+        create_chat_invite_link=AsyncMock(return_value=SimpleNamespace(invite_link="https://t.me/+fixture")),
+        approve_chat_join_request=AsyncMock(return_value=True),
+        set_my_commands=AsyncMock(return_value=True),
+        send_message=AsyncMock(),
+    )
+    data = {"workflow": "623g"}
+    context = SimpleNamespace(bot=api, user_data=data, application=SimpleNamespace(user_data={42: data}), args=[])
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(reply_text=AsyncMock()),
+        callback_query=None,
+    )
+    return bot, context, update
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_revocation_removes_members_without_creating_a_ban(group_access, failure):
+    bot, context, update = group_access
+    bot.db.bind_workflow(42, "623")
+    bot.db.bind_workflow(99, "669aosp")
+    bot.db.set_pending_join(42, 4200)
+    context.args = ["TEST_DEVICE_123"]
+    update.effective_user.id = 1
+    if failure:
+        context.bot.unban_chat_member.side_effect = RuntimeError("temporary Telegram failure")
+    asyncio.run(bot.revoke(update, context))
+    context.bot.ban_chat_member.assert_not_awaited()
+    context.bot.unban_chat_member.assert_awaited_once_with(-10012345, 42, only_if_banned=False)
+    assert bot.db.serial_for_user(42) is None
+    assert bot.db.workflow_for_user(42) is None
+    assert bot.db.workflow_for_user(99) == "669aosp"
+    assert bot.db.get_pending_join(42) is None
+    assert context.application.user_data[42] == {}
+    assert ("移出群组失败" in update.effective_message.reply_text.call_args.args[0]) == failure
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_start_recovers_a_legacy_ban_before_issuing_an_invite(group_access, failure):
+    bot, context, update = group_access
+    context.bot.get_chat_member.return_value = SimpleNamespace(status=ChatMemberStatus.BANNED)
+    if failure:
+        context.bot.unban_chat_member.side_effect = RuntimeError("temporary Telegram failure")
+    asyncio.run(bot.start(update, context))
+    context.bot.unban_chat_member.assert_awaited_once_with(-10012345, 42, only_if_banned=True)
+    reply = update.effective_message.reply_text.call_args.args[0]
+    if failure:
+        context.bot.create_chat_invite_link.assert_not_awaited()
+        assert "无法恢复入群权限" in reply
+    else:
+        assert context.bot.create_chat_invite_link.await_count == 1
+        assert context.bot.create_chat_invite_link.call_args.kwargs["creates_join_request"] is True
+        assert "https://t.me/+fixture" in reply
+    assert bot.db.serial_for_user(42) == "TEST_DEVICE_123"
+
+
+@pytest.mark.parametrize("binding", ["deleted", "disabled", "another-user"])
+def test_recovery_requires_an_enabled_serial_owned_by_the_same_user(group_access, binding):
+    bot, context, _update = group_access
+    if binding == "deleted":
+        bot.db.revoke_serial("TEST_DEVICE_123")
+    else:
+        with bot.db._connect() as connection:
+            if binding == "disabled":
+                connection.execute("UPDATE serials SET enabled=0")
+            else:
+                connection.execute("UPDATE serials SET owner_user_id=99")
+    with pytest.raises(ValueError, match="enabled bound serial"):
+        asyncio.run(bot.create_join_request_invite(context, 42))
+    context.bot.get_chat_member.assert_not_awaited()
+    context.bot.unban_chat_member.assert_not_awaited()
+    context.bot.create_chat_invite_link.assert_not_awaited()
+
+
+@pytest.mark.parametrize("is_member", [False, True])
+def test_restricted_member_checks_use_actual_membership(group_access, is_member):
+    bot, context, _update = group_access
+    context.bot.get_chat_member.return_value = SimpleNamespace(
+        status=ChatMemberStatus.RESTRICTED, is_member=is_member
+    )
+    assert asyncio.run(bot.is_channel_member(context, 42)) is is_member
+    context.bot.unban_chat_member.assert_not_awaited()
+
+
+def test_valid_bound_join_requests_are_approved_without_rebinding(group_access):
+    bot, context, update = group_access
+    bot.db.set_pending_join(42, 4200)
+    update.chat_join_request = SimpleNamespace(
+        chat=SimpleNamespace(id=-10012345), from_user=SimpleNamespace(id=42), user_chat_id=4200
+    )
+    asyncio.run(bot.join_request(update, context))
+    context.bot.approve_chat_join_request.assert_awaited_once_with(-10012345, 42)
+    assert bot.db.get_pending_join(42) is None
+    assert bot.db.serial_for_user(42) == "TEST_DEVICE_123"
+    assert context.user_data == {}
+    assert "已批准" in context.bot.send_message.call_args.args[1]
+
+
+def test_new_binding_without_a_pending_request_receives_a_fresh_invite(group_access):
+    bot, context, update = group_access
+    bot.db.revoke_serial("TEST_DEVICE_123")
+    bot.db.allow_serial("TEST_REBOUND_456", None, 1)
+    context.user_data = {"awaiting_join_serial": True}
+    update.effective_message.text = "TEST_REBOUND_456"
+    asyncio.run(bot.text_message(update, context))
+    assert bot.db.serial_for_user(42) == "TEST_REBOUND_456"
+    assert context.bot.create_chat_invite_link.await_count == 1
+    context.bot.unban_chat_member.assert_not_awaited()
+    assert "https://t.me/+fixture" in update.effective_message.reply_text.call_args.args[0]

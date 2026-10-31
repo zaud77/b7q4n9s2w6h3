@@ -51,6 +51,7 @@ jobs:
               and .aospMainline == true
               and .ntsyncSelectable == true
               and .bbrVersion == 3
+              and .serialRebindRecovery == true
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
               and .privateBuildsReady == true
