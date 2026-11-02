@@ -52,6 +52,7 @@ jobs:
               and .ntsyncSelectable == true
               and .bbrVersion == 3
               and .serialRebindRecovery == true
+              and .cpuperfClockFixLabel == "cpuperf时钟修复"
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
               and .privateBuildsReady == true

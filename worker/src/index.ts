@@ -129,7 +129,7 @@ const LEGACY_WORKFLOW_KEYS: Record<string, string> = {
 const BOOL_LABELS: Record<string, string> = {
   zram_writeback_enable: "独立回写",
   qpace_enable: "QPaCE",
-  hmbird_cpuperf_fix: "风驰 CPUPerf 时钟修复",
+  hmbird_cpuperf_fix: "cpuperf时钟修复",
   ntsync_enable: "NTSYNC",
   self_config: "自用配置",
   susfs_enable: "SUSFS",
@@ -1806,6 +1806,7 @@ export default {
         dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)),
         quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true,
         ntsyncSelectable: Boolean(BOOL_LABELS.ntsync_enable), bbrVersion: 3, serialRebindRecovery: true,
+        cpuperfClockFixLabel: BOOL_LABELS.hmbird_cpuperf_fix,
       });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {

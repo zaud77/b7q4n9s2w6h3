@@ -109,7 +109,7 @@ LEGACY_WORKFLOW_KEYS = {
 BOOL_LABELS = {
     "zram_writeback_enable": "独立回写",
     "qpace_enable": "QPaCE",
-    "hmbird_cpuperf_fix": "风驰 CPUPerf 时钟修复",
+    "hmbird_cpuperf_fix": "cpuperf时钟修复",
     "ntsync_enable": "NTSYNC",
     "self_config": "自用配置",
     "susfs_enable": "SUSFS",

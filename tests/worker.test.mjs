@@ -772,6 +772,8 @@ test("mainline AOSP dispatch requires ordinary binding and forwards HMBIRD optio
   const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
   assert.ok(buttons.some(button => button.callback_data === "set:qpace_enable:true"));
   assert.ok(buttons.some(button => button.callback_data === "set:hmbird_cpuperf_fix:true"));
+  assert.ok(buttons.find(button => button.callback_data === "set:hmbird_cpuperf_fix:true").text.includes("cpuperf时钟修复"));
+  assert.ok(!buttons.find(button => button.callback_data === "set:hmbird_cpuperf_fix:true").text.includes("风驰"));
   await worker.dispatchBuild(env, query, draft);
   const [call] = dispatches(state);
   assert.equal(call.body.ref, "main");
@@ -1222,6 +1224,7 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(body.ntsyncSelectable, true);
   assert.equal(body.bbrVersion, 3);
   assert.equal(body.serialRebindRecovery, true);
+  assert.equal(body.cpuperfClockFixLabel, "cpuperf时钟修复");
   assert.equal(body.privateBuildsReady, false);
   assert.deepEqual(body.nomountKernelSeries, ["6.12", "6.18"]);
   assert.equal(body.dailyBuildLimit, 2);
@@ -1236,6 +1239,7 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.ok(deploy.includes('and .ntsyncSelectable == true'));
   assert.ok(deploy.includes('and .bbrVersion == 3'));
   assert.ok(deploy.includes('and .serialRebindRecovery == true'));
+  assert.ok(deploy.includes('and .cpuperfClockFixLabel == "cpuperf时钟修复"'));
   Object.assign(env, { PRIVATE_BUILD_TOKEN: "private-fixture-token", PRIVATE_KERNEL_REPOSITORY: "private/kernel", PRIVATE_LKM_REPOSITORY: "private/lkm" });
   const configured = await (await worker.default.fetch(new Request("https://fixture.invalid/health"), env, {})).json();
   assert.equal(configured.privateBuildsReady, true);
