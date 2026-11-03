@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS user_build_preferences (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS build_option_profiles (
+  telegram_user_id INTEGER NOT NULL,
+  build_scope TEXT NOT NULL CHECK(build_scope IN ('self','others')),
+  options TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (telegram_user_id, build_scope)
+);
+
 CREATE TABLE IF NOT EXISTS chat_messages (
   telegram_user_id INTEGER NOT NULL,
   chat_id INTEGER NOT NULL,

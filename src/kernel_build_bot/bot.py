@@ -136,7 +136,7 @@ BOOL_OPTION_ROWS = (
 KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "finasu", "ksu", "none"]
 KSU_LABELS = {
     "bakasu": "BakaSU",
-    "sukisu": "SukiSU Ultra（BakaSU 内核）",
+    "sukisu": "SukiSU Ultra",
     "ksunext": "KernelSU Next",
     "kowsu": "KowSU",
     "finasu": "FinaSU",
@@ -553,7 +553,7 @@ class KernelBuildBot:
             else normalize_workflow_key(self.db.workflow_for_user(user.id))
         )
         options = build_options_with_preferences(
-            self.db.get_build_preferences(user.id), self.is_admin(user.id)
+            self.db.get_build_preferences(user.id, admin=self.is_admin(user.id)), self.is_admin(user.id)
         )
         context.user_data.update(serial=serial, options=options)
         if bound_workflow:
@@ -612,7 +612,7 @@ class KernelBuildBot:
         context.user_data.update(
             serial=serial,
             options=build_options_with_preferences(
-                self.db.get_build_preferences(user.id), self.is_admin(user.id)
+                self.db.get_build_preferences(user.id, scope="others", admin=True), self.is_admin(user.id)
             ),
             owner_directed_build=True,
             delivery_chat_id=user.id,
@@ -726,7 +726,11 @@ class KernelBuildBot:
             context.user_data.pop("workflow", None)
             context.user_data.pop("selected_script", None)
             context.user_data["options"] = build_options_with_preferences(
-                self.db.get_build_preferences(query.from_user.id), self.is_admin(query.from_user.id)
+                self.db.get_build_preferences(
+                    query.from_user.id,
+                    scope="others" if context.user_data.get("owner_directed_build") else "self",
+                    admin=self.is_admin(query.from_user.id),
+                ), self.is_admin(query.from_user.id)
             )
             bound_script = None
             if not self.is_admin(query.from_user.id):
@@ -788,7 +792,11 @@ class KernelBuildBot:
                     return
             variants = SCRIPTS[key][1]
             context.user_data["options"] = build_options_with_preferences(
-                self.db.get_build_preferences(query.from_user.id), self.is_admin(query.from_user.id)
+                self.db.get_build_preferences(
+                    query.from_user.id,
+                    scope="others" if context.user_data.get("owner_directed_build") else "self",
+                    admin=self.is_admin(query.from_user.id),
+                ), self.is_admin(query.from_user.id)
             )
             context.user_data["selected_script"] = key
             if variants:
@@ -964,7 +972,9 @@ class KernelBuildBot:
             await query.edit_message_text("构建脚本绑定复核失败，请重新使用 /build。")
             return
         _, workflow = WORKFLOWS[workflow_key]
-        inputs = dict(context.user_data["options"])
+        selected_options = dict(context.user_data["options"])
+        submitted_session = {**context.user_data, "options": selected_options}
+        inputs = dict(selected_options)
         inputs.pop("zarm_tool", None)
         if workflow_key == AOSP_WORKFLOW_KEY:
             inputs.pop("ccache_update", None)
@@ -1025,7 +1035,8 @@ class KernelBuildBot:
                 logging.error("GitHub dispatch failed: %s %s", response.status_code, response.text)
                 await query.edit_message_text("提交失败，请稍后重试。")
                 return
-        serialized_inputs = json.dumps(inputs, sort_keys=True)
+        scope = "others" if owner_directed else "self"
+        serialized_inputs = json.dumps({**inputs, "build_scope": scope}, sort_keys=True)
         self.db.record_build(user_id, serial, workflow, serialized_inputs)
         self.db.create_build_job(
             request_id, user_id, delivery_chat_id, workflow, serialized_inputs
@@ -1033,10 +1044,12 @@ class KernelBuildBot:
         self.db.save_build_preferences(
             user_id,
             build_options_with_preferences(
-                context.user_data["options"], self.is_admin(user_id)
+                selected_options, self.is_admin(user_id)
             ),
+            scope=scope,
         )
-        context.user_data.clear()
+        if context.user_data == submitted_session:
+            context.user_data.clear()
         await query.edit_message_text("已提交，完成后自动发包。")
 
     def github_headers(self) -> dict[str, str]:

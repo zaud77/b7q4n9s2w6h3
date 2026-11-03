@@ -79,6 +79,8 @@ def main() -> None:
     for table, columns in (
         ("pending_joins", ["telegram_user_id", "user_chat_id", "requested_at"]),
         ("workflow_bindings", ["telegram_user_id", "workflow_key", "bound_at"]),
+        ("build_preferences", ["telegram_user_id", "options", "updated_at"]),
+        ("build_option_profiles", ["telegram_user_id", "build_scope", "options", "updated_at"]),
         ("builds", ["id", "telegram_user_id", "serial_hash", "workflow", "inputs", "created_at"]),
         ("bot_state", ["key", "value"]),
     ):
@@ -87,9 +89,10 @@ def main() -> None:
         except sqlite3.OperationalError:
             continue
         target_columns = ["workflow_file" if name == "workflow" else name for name in columns]
+        target_table = "user_build_preferences" if table == "build_preferences" else table
         for row in rows:
             statements.append(
-                f"INSERT OR REPLACE INTO {table}({','.join(target_columns)}) VALUES("
+                f"INSERT OR REPLACE INTO {target_table}({','.join(target_columns)}) VALUES("
                 + ",".join(sql(row[name]) for name in columns) + ");"
             )
     jobs = list(db.execute(

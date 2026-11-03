@@ -60,6 +60,13 @@ class Database:
                     options TEXT NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS build_option_profiles (
+                    telegram_user_id INTEGER NOT NULL,
+                    build_scope TEXT NOT NULL CHECK(build_scope IN ('self','others')),
+                    options TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (telegram_user_id, build_scope)
+                );
                 CREATE TABLE IF NOT EXISTS build_jobs (
                     request_id TEXT PRIMARY KEY,
                     telegram_user_id INTEGER NOT NULL,
@@ -218,32 +225,55 @@ class Database:
                 db.execute("DELETE FROM workflow_bindings WHERE telegram_user_id=?", (user_id,))
         return [row["telegram_user_id"] for row in rows]
 
-    def get_build_preferences(self, user_id: int) -> dict[str, str]:
+    def get_build_preferences(self, user_id: int, scope: str = "self", admin: bool = False) -> dict[str, str]:
+        if scope not in {"self", "others"}:
+            raise ValueError("Invalid build preference scope")
         with self._connect() as db:
             row = db.execute(
-                "SELECT options FROM build_preferences WHERE telegram_user_id=?",
-                (user_id,),
+                "SELECT options FROM build_option_profiles WHERE telegram_user_id=? AND build_scope=?",
+                (user_id, scope),
             ).fetchone()
+            existing = row is not None
+            if row is None and scope == "self" and not admin:
+                row = db.execute(
+                    "SELECT options FROM build_preferences WHERE telegram_user_id=?", (user_id,)
+                ).fetchone()
             if row is None:
                 row = db.execute(
-                    "SELECT inputs AS options FROM builds WHERE telegram_user_id=? "
+                    "SELECT inputs AS options FROM builds WHERE telegram_user_id=? AND json_valid(inputs) "
+                    "AND CASE WHEN json_valid(inputs) THEN COALESCE(json_extract(inputs,'$.build_kind'),'kernel')='kernel' "
+                    "AND workflow!='lkm-device.yml' AND CASE "
+                    "WHEN json_extract(inputs,'$.build_scope') IN ('self','others') THEN json_extract(inputs,'$.build_scope') "
+                    "ELSE (SELECT CASE WHEN s.owner_user_id=builds.telegram_user_id THEN 'self' ELSE 'others' END "
+                    "FROM serials s WHERE s.enabled=1 AND s.serial_hash=builds.serial_hash LIMIT 1) "
+                    "END=? ELSE 0 END "
                     "ORDER BY created_at DESC, id DESC LIMIT 1",
-                    (user_id,),
+                    (user_id, scope),
                 ).fetchone()
-        if row is None:
-            return {}
-        try:
-            options = json.loads(row["options"])
-        except (TypeError, ValueError):
-            return {}
-        return options if isinstance(options, dict) else {}
+            if row is None:
+                return {}
+            try:
+                options = json.loads(row["options"])
+            except (TypeError, ValueError):
+                return {}
+            if not isinstance(options, dict):
+                return {}
+            if not existing:
+                db.execute(
+                    "INSERT INTO build_option_profiles(telegram_user_id,build_scope,options,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(telegram_user_id,build_scope) DO NOTHING",
+                    (user_id, scope, json.dumps(options, sort_keys=True), int(time.time())),
+                )
+            return options
 
-    def save_build_preferences(self, user_id: int, options: dict[str, str]) -> None:
+    def save_build_preferences(self, user_id: int, options: dict[str, str], scope: str = "self") -> None:
+        if scope not in {"self", "others"}:
+            raise ValueError("Invalid build preference scope")
         with self._connect() as db:
             db.execute(
-                "INSERT INTO build_preferences(telegram_user_id,options,updated_at) VALUES(?,?,?) "
-                "ON CONFLICT(telegram_user_id) DO UPDATE SET options=excluded.options,updated_at=excluded.updated_at",
-                (user_id, json.dumps(options, sort_keys=True), int(time.time())),
+                "INSERT INTO build_option_profiles(telegram_user_id,build_scope,options,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(telegram_user_id,build_scope) DO UPDATE SET options=excluded.options,updated_at=excluded.updated_at",
+                (user_id, scope, json.dumps(options, sort_keys=True), int(time.time())),
             )
 
     def bind_workflow(self, user_id: int, workflow_key: str) -> str:

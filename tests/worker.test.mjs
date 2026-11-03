@@ -11,7 +11,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration };";
+  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration, applyBuildPreferencesMigration, loadBuildPreferences };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -876,6 +876,119 @@ test("ZRAM preferences retain only supported compressor and size choices", () =>
 test("BakaSU is the default kernel manager and old ReSukiSU preferences migrate", () => {
   assert.equal(worker.normalizeBuildOptions({}, true).ksu_type, "bakasu");
   assert.equal(worker.normalizeBuildOptions({ ksu_type: "resukisu" }, true).ksu_type, "bakasu");
+});
+
+test("own and delegated submissions keep independent options across menus and other accounts", async t => {
+  const { env, state, database } = await quotaFixture(t);
+  env.ADMIN_USER_IDS = "42";
+  const own = { ...kernelSession(), options: worker.normalizeBuildOptions({ ksu_type: "sukisu", ntsync_enable: "true", self_config: "true" }, true) };
+  const delegated = { ...kernelSession(), ownerDirectedBuild: true, deliveryChatId: 42,
+    options: worker.normalizeBuildOptions({ ksu_type: "kowsu", nomount_enable: "true" }, true) };
+  await worker.dispatchBuild(env, query, own);
+  await worker.dispatchBuild(env, { ...query, message: { ...query.message, message_id: 9 } }, delegated);
+  assert.equal(dispatches(state).length, 2);
+  for (const call of dispatches(state)) assert.equal(call.body.inputs.build_scope, undefined);
+  const jobs = database.prepare("SELECT inputs FROM build_jobs ORDER BY request_id").all().map(row => JSON.parse(row.inputs));
+  assert.deepEqual(jobs.map(job => job.build_scope).sort(), ["others", "self"]);
+  const saved = scope => JSON.parse(database.prepare("SELECT options FROM build_option_profiles WHERE telegram_user_id=42 AND build_scope=?").get(scope).options);
+  assert.equal(saved("self").ksu_type, "sukisu");
+  assert.equal(saved("self").ntsync_enable, "true");
+  assert.equal(saved("others").ksu_type, "kowsu");
+  assert.equal(saved("others").ntsync_enable, "false");
+  const current = () => JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data);
+  for (const [command, scope, expected] of [["build", "self", "sukisu"], ["buildfor", "others", "kowsu"]]) {
+    await worker.handleCommand(env, accessUpdate(42), command, command === "build" ? [] : [serial]);
+    assert.equal(current().options.ksu_type, expected);
+    for (const data of ["kernel:623", "variant:623:gold", "back:scripts", "kernel:669aosp", "variant:669aosp:gki"]) {
+      await worker.handleCallback(env, { callback_query: { ...query, message: { ...query.message, message_id: 8 }, id: "profile", data } });
+      assert.equal(current().options.ksu_type, expected);
+      assert.equal(current().ownerDirectedBuild === true, scope === "others");
+    }
+    const menu = state.calls.filter(call => call.body?.reply_markup).at(-1).body.reply_markup;
+    if (expected === "sukisu") assert.ok(menu.inline_keyboard.flat().some(button => button.text === "KernelSU：SukiSU Ultra"));
+  }
+  assert.equal((await worker.loadBuildPreferences(env, 99, true, "self")).ksu_type, "bakasu");
+  assert.equal((await worker.loadBuildPreferences(env, 99, true, "others")).ntsync_enable, "false");
+});
+
+test("a rejected or ambiguous delegated submission leaves both saved profiles unchanged", async t => {
+  const { env, state, database, timestamp } = await quotaFixture(t);
+  env.ADMIN_USER_IDS = "42";
+  database.prepare("INSERT INTO build_option_profiles VALUES(?,?,?,?)").run(42, "self", '{"ksu_type":"sukisu"}', timestamp);
+  database.prepare("INSERT INTO build_option_profiles VALUES(?,?,?,?)").run(42, "others", '{"ksu_type":"kowsu"}', timestamp);
+  const before = database.prepare("SELECT * FROM build_option_profiles ORDER BY build_scope").all();
+  for (const [messageId, ambiguous] of [[7, false], [8, true]]) {
+    state.dispatchStatus = 403;
+    state.dispatchError = ambiguous ? new TypeError("connection lost") : null;
+    await worker.dispatchBuild(env, { ...query, message: { ...query.message, message_id: messageId } },
+      { ...kernelSession(), ownerDirectedBuild: true, deliveryChatId: 42, options: worker.normalizeBuildOptions({ ksu_type: "finasu" }, true) });
+    assert.deepEqual(database.prepare("SELECT * FROM build_option_profiles ORDER BY build_scope").all(), before);
+  }
+});
+
+test("legacy mixed preferences recover from the matching kernel target and skip malformed or NoMount history", async t => {
+  const { env, database, timestamp } = await quotaFixture(t);
+  env.ADMIN_USER_IDS = "42";
+  database.prepare("INSERT INTO user_build_preferences VALUES(?,?,?)").run(42, '{"ksu_type":"finasu"}', timestamp);
+  database.prepare("INSERT INTO serial_bindings(serial_hash,serial_value,owner_user_id,created_at,created_by) VALUES(?,?,?,?,?)")
+    .run(await worker.digestSerial(env, "OTHER_DEVICE_456"), "OTHER_DEVICE_456", 99, timestamp, 1);
+  const add = (id, inputs, created = timestamp) => database.prepare(
+    "INSERT INTO build_jobs(request_id,telegram_user_id,chat_id,workflow_file,inputs,status,created_at,updated_at) VALUES(?,42,42,'kernel.yml',?,'sent',?,?)"
+  ).run(id, JSON.stringify(inputs), created, created);
+  add("legacy-own", { device_serial: serial, ksu_type: "sukisu", ntsync_enable: "true" });
+  add("legacy-delegated", { device_serial: "OTHER_DEVICE_456", ksu_type: "kowsu", nomount_enable: "true" }, timestamp + 1);
+  add("legacy-lkm", { device_serial: serial, build_kind: "nomount-lkm", ksu_type: "ksu" }, timestamp + 2);
+  add("unknown-target", { ksu_type: "finasu" }, timestamp + 3);
+  add("unverifiable-target", { device_serial: "REMOVED_DEVICE", ksu_type: "finasu" }, timestamp + 3);
+  database.prepare("INSERT INTO build_jobs(request_id,telegram_user_id,chat_id,workflow_file,inputs,status,created_at,updated_at) VALUES('malformed',42,42,'kernel.yml','bad-json','failed',?,?)").run(timestamp + 4, timestamp + 4);
+  const own = await worker.loadBuildPreferences(env, 42, true, "self");
+  const delegated = await worker.loadBuildPreferences(env, 42, true, "others");
+  assert.equal(own.ksu_type, "sukisu");
+  assert.equal(own.ntsync_enable, "true");
+  assert.equal(delegated.ksu_type, "kowsu");
+  assert.equal(delegated.nomount_enable, "true");
+  assert.equal(database.prepare("SELECT options FROM user_build_preferences WHERE telegram_user_id=42").get().options, '{"ksu_type":"finasu"}');
+  database.prepare("DELETE FROM build_jobs").run();
+  database.prepare("UPDATE serial_bindings SET owner_user_id=99").run();
+  assert.equal((await worker.loadBuildPreferences(env, 42, true, "self")).ksu_type, "sukisu");
+  assert.equal((await worker.loadBuildPreferences(env, 42, true, "others")).ksu_type, "kowsu");
+});
+
+test("ordinary users retain legacy own options while an unclassifiable administrator profile stays separate", async t => {
+  const { env, database, timestamp } = await quotaFixture(t);
+  for (const userId of [42, 99]) database.prepare("INSERT INTO user_build_preferences VALUES(?,?,?)").run(userId, '{"ntsync_enable":"true","self_config":"true"}', timestamp);
+  assert.equal((await worker.loadBuildPreferences(env, 42, false)).ntsync_enable, "true");
+  assert.equal((await worker.loadBuildPreferences(env, 42, false)).self_config, "false");
+  assert.equal((await worker.loadBuildPreferences(env, 99, true)).ntsync_enable, "false");
+  assert.equal((await worker.loadBuildPreferences(env, 99, true, "others")).ntsync_enable, "false");
+  assert.equal(database.prepare("SELECT COUNT(*) AS total FROM user_build_preferences").get().total, 2);
+});
+
+test("explicit build scope survives changed serial ownership and does not copy unrelated target history", async t => {
+  const { env, database, timestamp } = await quotaFixture(t);
+  database.prepare("UPDATE serial_bindings SET owner_user_id=99").run();
+  for (const [id, inputs] of [["marked-self", { build_scope: "self", device_serial: serial, ntsync_enable: "true" }],
+    ["marked-others", { build_scope: "others", device_serial: serial, ksu_type: "sukisu" }],
+    ["unknown", { device_serial: "DIFFERENT_DEVICE", ksu_type: "finasu" }]]) {
+    database.prepare("INSERT INTO build_jobs(request_id,telegram_user_id,chat_id,workflow_file,inputs,status,created_at,updated_at) VALUES(?,42,42,'kernel.yml',?,'sent',?,?)")
+      .run(id, JSON.stringify(inputs), timestamp, timestamp);
+  }
+  assert.equal((await worker.loadBuildPreferences(env, 42, true, "self")).ntsync_enable, "true");
+  assert.equal((await worker.loadBuildPreferences(env, 42, true, "others")).ksu_type, "sukisu");
+});
+
+test("profile table migration upgrades an existing database idempotently without changing bindings or legacy options", async t => {
+  const { env, database, timestamp } = await quotaFixture(t);
+  database.exec("DROP TABLE build_option_profiles");
+  database.prepare("INSERT INTO user_build_preferences VALUES(?,?,?)").run(42, '{"ntsync_enable":"true"}', timestamp);
+  database.prepare("INSERT INTO bot_state VALUES(?,?)").run("migration:user-build-preferences-v1", "done");
+  const before = database.prepare("SELECT * FROM serial_bindings").all();
+  assert.equal(await worker.applyBuildPreferencesMigration(env), "migration:scoped-build-preferences-v2");
+  database.prepare("INSERT INTO build_option_profiles VALUES(?,?,?,?)").run(42, "others", '{"ksu_type":"sukisu"}', timestamp);
+  await worker.applyBuildPreferencesMigration(env);
+  assert.deepEqual(database.prepare("SELECT * FROM serial_bindings").all(), before);
+  assert.equal(database.prepare("SELECT options FROM user_build_preferences WHERE telegram_user_id=42").get().options, '{"ntsync_enable":"true"}');
+  assert.equal((await worker.loadBuildPreferences(env, 42, true, "others")).ksu_type, "sukisu");
 });
 
 test("NTSYNC defaults off and remains independent of DroidSpaces preferences", () => {

@@ -37,11 +37,13 @@ type Session = {
   menuChatId?: number;
 };
 
+type BuildScope = "self" | "others";
+
 const SERIAL_RE = /^[A-Za-z0-9._:-]{6,64}$/;
 const DATA_MIGRATION_KEY = "migration:explicit-workflow-binding-v2";
 const QUOTA_MIGRATION_KEY = "migration:successful-build-quota-v1";
 const CHAT_HISTORY_MIGRATION_KEY = "migration:private-chat-clear-v1";
-const BUILD_PREFERENCES_MIGRATION_KEY = "migration:user-build-preferences-v1";
+const BUILD_PREFERENCES_MIGRATION_KEY = "migration:scoped-build-preferences-v2";
 const COMMAND_MENU_REVISION = "commands:scoped-menus-v8";
 const AOSP_MAINLINE_MIGRATION_KEY = "migration:aosp-mainline-v2";
 const UNVERIFIED_COMMANDS = [
@@ -156,7 +158,7 @@ const BOOL_OPTION_ROWS = [
 const KSU_VALUES = ["bakasu", "sukisu", "ksunext", "kowsu", "finasu", "ksu", "none"];
 const KSU_LABELS: Record<string, string> = {
   bakasu: "BakaSU",
-  sukisu: "SukiSU Ultra（BakaSU 内核）",
+  sukisu: "SukiSU Ultra",
   ksunext: "KernelSU Next",
   kowsu: "KowSU",
   finasu: "FinaSU",
@@ -220,31 +222,59 @@ function normalizeBuildOptions(saved: unknown, admin: boolean): Record<string, s
   if (!admin) options.self_config = "false";
   return options;
 }
-async function saveBuildPreferences(env: Env, userId: number, saved: unknown, admin: boolean) {
+function buildScope(session: Session): BuildScope {
+  return session.ownerDirectedBuild === true ? "others" : "self";
+}
+async function saveBuildPreferences(env: Env, userId: number, saved: unknown, admin: boolean, scope: BuildScope = "self") {
   const options = normalizeBuildOptions(saved, admin);
   await env.DB.prepare(
-    "INSERT INTO user_build_preferences(telegram_user_id,options,updated_at) VALUES(?,?,?) " +
-    "ON CONFLICT(telegram_user_id) DO UPDATE SET options=excluded.options,updated_at=excluded.updated_at"
-  ).bind(userId, JSON.stringify(options), now()).run();
+    "INSERT INTO build_option_profiles(telegram_user_id,build_scope,options,updated_at) VALUES(?,?,?,?) " +
+    "ON CONFLICT(telegram_user_id,build_scope) DO UPDATE SET options=excluded.options,updated_at=excluded.updated_at"
+  ).bind(userId, scope, JSON.stringify(options), now()).run();
 }
-async function loadBuildPreferences(env: Env, userId: number, admin: boolean): Promise<Record<string, string>> {
+async function loadBuildPreferences(env: Env, userId: number, admin: boolean, scope: BuildScope = "self"): Promise<Record<string, string>> {
   const row: any = await env.DB.prepare(
-    "SELECT options FROM user_build_preferences WHERE telegram_user_id=?"
-  ).bind(userId).first();
+    "SELECT options FROM build_option_profiles WHERE telegram_user_id=? AND build_scope=?"
+  ).bind(userId, scope).first();
   let saved: unknown;
   if (row?.options) {
     try { saved = JSON.parse(String(row.options)); } catch { saved = undefined; }
   }
-  if (saved === undefined) {
-    const previous: any = await env.DB.prepare(
-      "SELECT inputs FROM build_jobs WHERE telegram_user_id=? AND inputs IS NOT NULL AND inputs!='{}' ORDER BY created_at DESC LIMIT 1"
+  if (!row && scope === "self" && !admin) {
+    const legacy: any = await env.DB.prepare(
+      "SELECT options FROM user_build_preferences WHERE telegram_user_id=?"
     ).bind(userId).first();
+    if (legacy?.options) {
+      try { saved = JSON.parse(String(legacy.options)); } catch { saved = undefined; }
+    }
+  }
+  if (!row && saved === undefined) {
+    const previous: any = await env.DB.prepare(
+      "SELECT inputs FROM build_jobs WHERE telegram_user_id=? AND json_valid(inputs) " +
+      "AND CASE WHEN json_valid(inputs) THEN COALESCE(json_extract(inputs,'$.build_kind'),'kernel')='kernel' " +
+      "AND workflow_file!='lkm-device.yml' AND CASE " +
+      "WHEN json_extract(inputs,'$.build_scope') IN ('self','others') THEN json_extract(inputs,'$.build_scope') " +
+      "WHEN json_type(inputs,'$.device_serial')='text' THEN " +
+      "(SELECT CASE WHEN s.owner_user_id=build_jobs.telegram_user_id THEN 'self' ELSE 'others' END " +
+      "FROM serial_bindings s WHERE s.enabled=1 AND s.serial_value=json_extract(inputs,'$.device_serial') LIMIT 1) " +
+      "END=? ELSE 0 END ORDER BY created_at DESC,request_id DESC LIMIT 1"
+    ).bind(userId, scope).first();
     if (previous?.inputs) {
       try { saved = JSON.parse(String(previous.inputs)); } catch { saved = undefined; }
     }
   }
   const options = normalizeBuildOptions(saved, admin);
-  if (!row && saved !== undefined) await saveBuildPreferences(env, userId, options, admin);
+  if (!row && saved && typeof saved === "object" && !Array.isArray(saved)) {
+    await env.DB.prepare(
+      "INSERT INTO build_option_profiles(telegram_user_id,build_scope,options,updated_at) VALUES(?,?,?,?) " +
+      "ON CONFLICT(telegram_user_id,build_scope) DO NOTHING"
+    ).bind(userId, scope, JSON.stringify(options), now()).run();
+    const retained: any = await env.DB.prepare(
+      "SELECT options FROM build_option_profiles WHERE telegram_user_id=? AND build_scope=?"
+    ).bind(userId, scope).first();
+    try { return normalizeBuildOptions(JSON.parse(String(retained?.options)), admin); }
+    catch { return options; }
+  }
   return options;
 }
 function applyWorkflowDefaults(workflowKey: string, options: Record<string, string>): Record<string, string> {
@@ -687,6 +717,9 @@ async function applyBuildPreferencesMigration(env: Env): Promise<string> {
       "CREATE TABLE IF NOT EXISTS user_build_preferences (telegram_user_id INTEGER PRIMARY KEY, options TEXT NOT NULL, updated_at INTEGER NOT NULL)"
     ),
     env.DB.prepare(
+      "CREATE TABLE IF NOT EXISTS build_option_profiles (telegram_user_id INTEGER NOT NULL, build_scope TEXT NOT NULL CHECK(build_scope IN ('self','others')), options TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(telegram_user_id,build_scope))"
+    ),
+    env.DB.prepare(
       "INSERT INTO bot_state(key,value) VALUES(?, 'done') ON CONFLICT(key) DO UPDATE SET value=excluded.value"
     ).bind(BUILD_PREFERENCES_MIGRATION_KEY),
   ]);
@@ -988,7 +1021,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const serial = args[0] || "";
     if (!SERIAL_RE.test(serial)) { await sendMessage(env, chatId, "用法：/buildfor 序列号"); return; }
     if (!(await serialRecord(env, serial))) { await sendMessage(env, chatId, "该序列号不在启用的白名单中。"); return; }
-    const session = { serial, options: await loadBuildPreferences(env, userId, true), ownerDirectedBuild: true, deliveryChatId: userId };
+    const session = { serial, options: await loadBuildPreferences(env, userId, true, "others"), ownerDirectedBuild: true, deliveryChatId: userId };
     await sendBuildMenu(env, userId, chatId, session, `为序列号 ${serial} 构建；完成后的产物只发送给你。\n请选择内核脚本，或构建独立 NoMount 模块：`, await workflowMarkup(env, userId, true)); return;
   }
   if (command === "unbindscript") {
@@ -1123,7 +1156,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   const workflowFile = WORKFLOWS[workflowKey][1];
   if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "服务暂不可用，请稍后重试。"); return; }
   const ref = env.GITHUB_REF;
-  const stored = { ...inputs, build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref };
+  const stored = { ...inputs, build_scope: buildScope(session), build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref };
   const created = now();
   try {
     await env.DB.prepare(
@@ -1146,7 +1179,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     await finishJob(env, requestId, "failed");
     await clearSubmittedSession(env, userId, session); await editMessage(env, chatId, messageId, "提交失败，请稍后重试。"); return;
   }
-  try { await saveBuildPreferences(env, userId, selectedOptions, isAdmin(env, userId)); }
+  try { await saveBuildPreferences(env, userId, selectedOptions, isAdmin(env, userId), buildScope(session)); }
   catch (error) { console.error("save build preferences failed", userId, String(error)); }
   await clearSubmittedSession(env, userId, session); await editMessage(env, chatId, messageId, "已提交，完成后自动发包。");
 }
@@ -1315,7 +1348,7 @@ async function handleCallback(env: Env, update: any) {
   }
   if (data === "cancel") { await clearSession(env, userId); await editMessage(env, chatId, messageId, "已取消。"); return; }
   if (data === "back:scripts") {
-    delete session.workflow; delete session.selectedScript; session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
+    delete session.workflow; delete session.selectedScript; session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId), buildScope(session));
     if (!isAdmin(env, userId)) {
       const boundScript = await workflowForUser(env, userId);
       if (boundScript && SCRIPTS[boundScript]) {
@@ -1357,7 +1390,7 @@ async function handleCallback(env: Env, update: any) {
     const boundScript = isAdmin(env, userId) ? null : await workflowForUser(env, userId);
     if (boundScript && boundScript !== key) { await editMessage(env, chatId, messageId, "该账号已绑定其他构建脚本。"); return; }
     const variants = SCRIPTS[key][1];
-    session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId)); session.selectedScript = key;
+    session.options = await loadBuildPreferences(env, userId, isAdmin(env, userId), buildScope(session)); session.selectedScript = key;
     if (variants) {
       delete session.workflow;
       await setSession(env, userId, session);
@@ -1807,6 +1840,8 @@ export default {
         quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true,
         ntsyncSelectable: Boolean(BOOL_LABELS.ntsync_enable), bbrVersion: 3, serialRebindRecovery: true,
         cpuperfClockFixLabel: BOOL_LABELS.hmbird_cpuperf_fix,
+        separateBuildProfiles: true,
+        sukisuLabel: KSU_LABELS.sukisu,
       });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {

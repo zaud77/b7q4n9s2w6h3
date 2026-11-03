@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -44,6 +45,158 @@ def test_finasu_selection_is_retained():
     assert "finasu" in KSU_VALUES
     assert build_options_with_preferences({"ksu_type": "finasu"}, True)["ksu_type"] == "finasu"
     assert build_options_with_preferences({"ksu_type": "finasu"}, False)["ksu_type"] == "finasu"
+
+
+def test_self_and_delegated_profiles_survive_reopen_without_overwriting_other_users(tmp_path):
+    path = str(tmp_path / "profiles.db")
+    db = Database(path, "test-pepper")
+    db.save_build_preferences(42, {"ksu_type": "sukisu", "ntsync_enable": "true"})
+    db.save_build_preferences(42, {"ksu_type": "kowsu", "ntsync_enable": "false"}, scope="others")
+    db.save_build_preferences(99, {"ksu_type": "finasu"})
+    db = Database(path, "test-pepper")
+    assert db.get_build_preferences(42) == {"ksu_type": "sukisu", "ntsync_enable": "true"}
+    assert db.get_build_preferences(42, scope="others") == {"ksu_type": "kowsu", "ntsync_enable": "false"}
+    assert db.get_build_preferences(99) == {"ksu_type": "finasu"}
+    assert db.get_build_preferences(99, scope="others") == {}
+
+
+def test_administrator_legacy_profiles_recover_by_target_instead_of_the_shared_row(tmp_path):
+    db = Database(str(tmp_path / "legacy.db"), "test-pepper")
+    db.allow_serial("OWN_DEVICE_123", 42, 1)
+    db.allow_serial("OTHER_DEVICE_456", 99, 1)
+    db.record_build(42, "OWN_DEVICE_123", "kernel.yml", json.dumps({"ksu_type": "sukisu"}))
+    db.record_build(42, "OTHER_DEVICE_456", "kernel.yml", json.dumps({"ksu_type": "kowsu"}))
+    db.record_build(42, "OWN_DEVICE_123", "lkm-device.yml", json.dumps({"build_kind": "nomount-lkm", "ksu_type": "ksu"}))
+    db.record_build(42, "OWN_DEVICE_123", "kernel.yml", "bad-json")
+    db.record_build(42, "REMOVED_DEVICE", "kernel.yml", json.dumps({"ksu_type": "finasu"}))
+    with db._connect() as connection:
+        connection.execute("INSERT INTO build_preferences VALUES(?,?,?)", (42, '{"ksu_type":"finasu"}', 1))
+    assert db.get_build_preferences(42, admin=True)["ksu_type"] == "sukisu"
+    assert db.get_build_preferences(42, scope="others", admin=True)["ksu_type"] == "kowsu"
+    with db._connect() as connection:
+        assert connection.execute("SELECT options FROM build_preferences WHERE telegram_user_id=42").fetchone()[0] == '{"ksu_type":"finasu"}'
+
+
+def test_ordinary_legacy_options_are_preserved_and_unknown_admin_options_are_not_assigned(tmp_path):
+    db = Database(str(tmp_path / "legacy.db"), "test-pepper")
+    with db._connect() as connection:
+        for user_id in (42, 99):
+            connection.execute("INSERT INTO build_preferences VALUES(?,?,?)", (user_id, '{"ntsync_enable":"true"}', 1))
+    assert db.get_build_preferences(42) == {"ntsync_enable": "true"}
+    assert db.get_build_preferences(99, admin=True) == {}
+    assert db.get_build_preferences(99, scope="others", admin=True) == {}
+
+
+def test_explicit_profile_scope_survives_rebinding_and_buildfor_uses_its_own_scope_even_for_same_serial(tmp_path):
+    db = Database(str(tmp_path / "profiles.db"), "test-pepper")
+    db.allow_serial("OWN_DEVICE_123", 42, 1)
+    db.record_build(42, "OWN_DEVICE_123", "kernel.yml", json.dumps({"build_scope": "self", "ksu_type": "sukisu"}))
+    db.record_build(42, "OWN_DEVICE_123", "kernel.yml", json.dumps({"build_scope": "others", "ksu_type": "kowsu"}))
+    assert db.revoke_serial("OWN_DEVICE_123")
+    assert db.get_build_preferences(42, admin=True)["ksu_type"] == "sukisu"
+    assert db.get_build_preferences(42, scope="others", admin=True)["ksu_type"] == "kowsu"
+
+
+@pytest.mark.parametrize("scope", ["", "invalid", "SELF"])
+def test_invalid_profile_scopes_are_rejected(tmp_path, scope):
+    db = Database(str(tmp_path / "profiles.db"), "test-pepper")
+    with pytest.raises(ValueError):
+        db.get_build_preferences(42, scope=scope)
+    with pytest.raises(ValueError):
+        db.save_build_preferences(42, {}, scope=scope)
+
+
+@pytest.fixture
+def profile_bot(tmp_path):
+    bot = KernelBuildBot.__new__(KernelBuildBot)
+    bot.settings = SimpleNamespace(
+        admin_user_ids={42}, github_use_gh_cli=False, github_repo="fixture/kernel",
+        github_ref="main", github_token="fixture-token",
+    )
+    bot.db = Database(str(tmp_path / "bot.db"), "test-pepper")
+    bot.db.allow_serial("OWN_DEVICE_123", 42, 1)
+    bot.db.allow_serial("OTHER_DEVICE_456", 99, 1)
+    bot.is_channel_member = AsyncMock(return_value=True)
+    bot.reject_while_building = AsyncMock(return_value=False)
+    context = SimpleNamespace(user_data={}, args=[])
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=42), answer=AsyncMock(),
+        edit_message_text=AsyncMock(), edit_message_reply_markup=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        effective_user=query.from_user, effective_chat=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(reply_text=AsyncMock()), callback_query=query,
+    )
+    return bot, context, update
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_command_and_back_navigation_keep_the_selected_profile(profile_bot, delegated):
+    bot, context, update = profile_bot
+    bot.db.save_build_preferences(42, {"ksu_type": "sukisu", "ntsync_enable": "true"})
+    bot.db.save_build_preferences(42, {"ksu_type": "kowsu", "ntsync_enable": "false"}, scope="others")
+    context.args = ["OTHER_DEVICE_456"] if delegated else []
+    asyncio.run((bot.build_for if delegated else bot.build)(update, context))
+    expected = "kowsu" if delegated else "sukisu"
+    assert context.user_data["options"]["ksu_type"] == expected
+    for data in ("kernel:623", "variant:623:gold", "back:scripts", "kernel:669aosp", "variant:669aosp:gki"):
+        update.callback_query.data = data
+        asyncio.run(bot.callback(update, context))
+        assert context.user_data["options"]["ksu_type"] == expected
+        assert bool(context.user_data.get("owner_directed_build")) == delegated
+    if not delegated:
+        menu = bot.options_markup(context.user_data["options"], True, "669aosp")
+        assert "KernelSU：SukiSU Ultra" in [button.text for row in menu.inline_keyboard for button in row]
+
+
+@pytest.mark.parametrize("status", [204, 403])
+def test_only_accepted_submissions_save_their_own_profile_and_keep_scope_out_of_dispatch(profile_bot, monkeypatch, status):
+    bot, context, update = profile_bot
+    bot.db.save_build_preferences(42, {"ksu_type": "sukisu"})
+    bot.db.save_build_preferences(42, {"ksu_type": "kowsu"}, scope="others")
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.post.return_value = SimpleNamespace(status_code=status, text="fixture rejection")
+    monkeypatch.setattr("kernel_build_bot.bot.httpx.AsyncClient", lambda **_kwargs: client)
+    for delegated in (False, True):
+        context.user_data = {
+            "serial": "OTHER_DEVICE_456" if delegated else "OWN_DEVICE_123",
+            "workflow": "623g", "options": defaults(),
+            "owner_directed_build": delegated, "delivery_chat_id": 42,
+        }
+        context.user_data["options"]["ksu_type"] = "finasu" if delegated else "ksunext"
+        asyncio.run(bot.dispatch(update.callback_query, context))
+    assert client.post.await_count == 2
+    assert all("build_scope" not in call.kwargs["json"]["inputs"] for call in client.post.await_args_list)
+    assert bot.db.get_build_preferences(42)["ksu_type"] == ("ksunext" if status == 204 else "sukisu")
+    assert bot.db.get_build_preferences(42, scope="others")["ksu_type"] == ("finasu" if status == 204 else "kowsu")
+    with bot.db._connect() as connection:
+        scopes = [json.loads(row[0])["build_scope"] for row in connection.execute("SELECT inputs FROM builds ORDER BY id")]
+    assert scopes == (["self", "others"] if status == 204 else [])
+
+
+def test_a_finishing_self_submission_cannot_save_or_clear_a_new_delegated_draft(profile_bot, monkeypatch):
+    bot, context, update = profile_bot
+    own = {"serial": "OWN_DEVICE_123", "workflow": "623g", "options": {**defaults(), "ksu_type": "sukisu"}}
+    delegated = {
+        "serial": "OTHER_DEVICE_456", "workflow": "669aosp", "options": {**defaults(), "ksu_type": "kowsu"},
+        "owner_directed_build": True, "delivery_chat_id": 42,
+    }
+    context.user_data.update(own)
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+
+    async def replace_draft(*_args, **_kwargs):
+        context.user_data.clear()
+        context.user_data.update(delegated)
+        return SimpleNamespace(status_code=204)
+
+    client.post.side_effect = replace_draft
+    monkeypatch.setattr("kernel_build_bot.bot.httpx.AsyncClient", lambda **_kwargs: client)
+    asyncio.run(bot.dispatch(update.callback_query, context))
+    assert bot.db.get_build_preferences(42)["ksu_type"] == "sukisu"
+    assert bot.db.get_build_preferences(42, scope="others") == {}
+    assert context.user_data == delegated
 
 
 def test_serial_owner_and_revoke(tmp_path):
@@ -375,7 +528,7 @@ def test_admin_build_is_exempt_from_daily_quota():
 
     bot = KernelBuildBot.__new__(KernelBuildBot)
     bot.settings = SimpleNamespace(daily_build_limit=2)
-    bot.db = SimpleNamespace(serial_for_user=lambda _user_id: "TEST_DEVICE_123", get_build_preferences=lambda _user_id: None)
+    bot.db = SimpleNamespace(serial_for_user=lambda _user_id: "TEST_DEVICE_123", get_build_preferences=lambda _user_id, **_kwargs: None)
     bot.is_admin = lambda _user_id: True
     bot.reject_while_building = no_active
     bot.is_channel_member = member
