@@ -116,7 +116,7 @@ BOOL_LABELS = {
     "nomount_enable": "NoMount",
     "kpm_enable": "KPM / KPatch Next",
     "lz4_enable": "LZ4 + Zstd",
-    "lz4kd_enable": "LZ4KD",
+    "lz4kd_enable": "LZ4KD / LZ4KD_N",
     "unicode_enable": "Unicode 修复",
     "better_net": "网络增强",
     "adios_enable": "ADIOS",

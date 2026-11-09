@@ -138,7 +138,7 @@ const BOOL_LABELS: Record<string, string> = {
   nomount_enable: "NoMount",
   kpm_enable: "KPM / KPatch Next",
   lz4_enable: "LZ4 + Zstd",
-  lz4kd_enable: "LZ4KD",
+  lz4kd_enable: "LZ4KD / LZ4KD_N",
   unicode_enable: "Unicode 修复",
   better_net: "网络增强",
   adios_enable: "ADIOS",
@@ -168,9 +168,9 @@ const KSU_LABELS: Record<string, string> = {
 };
 const BBR_VALUES = ["false", "true", "default"];
 const DROID_VALUES = ["false", "standard", "extend"];
-const ZRAM_VALUES = ["default", "qpace-lz4", "qpace", "lz4kd"];
+const ZRAM_VALUES = ["default", "qpace-lz4", "qpace", "lz4kd", "lz4kd_n"];
 const ZRAM_LABELS: Record<string, string> = {
-  default: "保持系统默认", "qpace-lz4": "qpace-lz4", qpace: "qpace", lz4kd: "lz4kd",
+  default: "保持系统默认", "qpace-lz4": "qpace-lz4", qpace: "qpace", lz4kd: "lz4kd", lz4kd_n: "lz4kd_n",
 };
 const ZRAM_SIZE_VALUES = ["default", "4", "6", "8", "10", "12", "16", "24", "32"];
 const ZRAM_SIZE_LABELS: Record<string, string> = Object.fromEntries(

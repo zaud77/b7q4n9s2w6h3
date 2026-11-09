@@ -714,6 +714,10 @@ test("AOSP menu keeps its exact name and requires explicit script binding", asyn
   await click("bind:669aosp");
   await click("variant:669aosp:gki");
   const buttons = state.calls.at(-1).body.reply_markup.inline_keyboard.flat();
+  const compression = buttons.filter(button => button.callback_data.startsWith("set:lz4kd_enable:"));
+  assert.equal(compression.length, 1);
+  assert.match(compression[0].text, /LZ4KD \/ LZ4KD_N/);
+  assert.ok(!buttons.some(button => button.callback_data.startsWith("set:lz4kd_n_enable:")));
   assert.deepEqual(buttons.slice(0, 2).map(button => button.callback_data), ["set:zram_writeback_enable:true", "set:qpace_enable:true"]);
   assert.ok(buttons.some(button => button.text === "默认 ZRAM：保持系统默认" && button.callback_data === "set:zram_default_algorithm:qpace-lz4"));
   assert.ok(buttons.some(button => button.text === "ZRAM 大小：保持系统默认" && button.callback_data === "set:zram_size_gib:4"));
@@ -862,8 +866,24 @@ test("device-specific builds do not receive AOSP-only workflow inputs", async t 
   assert.equal(call.body.inputs.ccache_debug, "false");
 });
 
+test("both compression codecs share one build flag and AOSP forwards the selected codec", async t => {
+  for (const workflow of ["623g", "669aosp"]) {
+    for (const enabled of ["false", "true"]) {
+      await t.test(`${workflow} compression=${enabled}`, async sub => {
+        const { env, state } = await fixture(sub, { workflowBinding: workflow === "669aosp" ? "669aosp" : "623" });
+        const options = worker.normalizeBuildOptions({ lz4kd_enable: enabled, zram_default_algorithm: "lz4kd_n" }, false);
+        await worker.dispatchBuild(env, query, { serial, workflow, options });
+        const [call] = dispatches(state);
+        assert.equal(call.body.inputs.lz4kd_enable, enabled);
+        assert.equal(call.body.inputs.lz4kd_n_enable, undefined);
+        assert.equal(call.body.inputs.zram_default_algorithm, workflow === "669aosp" ? "lz4kd_n" : undefined);
+      });
+    }
+  }
+});
+
 test("ZRAM preferences retain only supported compressor and size choices", () => {
-  for (const algorithm of ["default", "qpace-lz4", "qpace", "lz4kd"])
+  for (const algorithm of ["default", "qpace-lz4", "qpace", "lz4kd", "lz4kd_n"])
     assert.equal(worker.normalizeBuildOptions({ zram_default_algorithm: algorithm }, false).zram_default_algorithm, algorithm);
   assert.equal(worker.normalizeBuildOptions({ zram_default_algorithm: "invalid" }, false).zram_default_algorithm, "default");
   for (const size of ["default", "4", "6", "8", "10", "12", "16", "24", "32"])

@@ -442,7 +442,7 @@ def test_self_config_is_hidden_from_non_owner_build_menu():
         ["⬜ NTSYNC"],
         ["⬜ SUSFS", "⬜ NoMount"],
         ["⬜ KPM / KPatch Next", "✅ LZ4 + Zstd"],
-        ["⬜ LZ4KD", "✅ Unicode 修复"],
+        ["⬜ LZ4KD / LZ4KD_N", "✅ Unicode 修复"],
         ["⬜ 网络增强", "⬜ ADIOS"],
         ["⬜ Re-Kernel", "⬜ 基带保护"],
     ]
