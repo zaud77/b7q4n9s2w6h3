@@ -1842,6 +1842,9 @@ export default {
         cpuperfClockFixLabel: BOOL_LABELS.hmbird_cpuperf_fix,
         separateBuildProfiles: true,
         sukisuLabel: KSU_LABELS.sukisu,
+          compressionOptionLabel: BOOL_LABELS.lz4kd_enable,
+          compressionSharedInput: "lz4kd_enable",
+          zramDefaultAlgorithms: ZRAM_VALUES,
       });
     }
     if (request.method === "GET" && url.pathname === `/setup-webhook/${env.WEBHOOK_SECRET}`) {

@@ -46,6 +46,8 @@ jobs:
               and .buildPreferencesMigration == "migration:scoped-build-preferences-v2"
               and .separateBuildProfiles == true
               and .sukisuLabel == "SukiSU Ultra"
+              and .compressionOptionLabel == "LZ4KD / LZ4KD_N"
+              and .compressionSharedInput == "lz4kd_enable"
               and .commandMenus == "commands:scoped-menus-v8"
               and .nomountKernelSeries == ["6.12", "6.18"]
               and .adminParallelBuilds == true

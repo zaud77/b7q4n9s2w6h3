@@ -1362,6 +1362,9 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.deepEqual(body.nomountKernelSeries, ["6.12", "6.18"]);
   assert.equal(body.dailyBuildLimit, 2);
   assert.equal(body.quotaIncludesAdmins, false);
+  assert.equal(body.compressionOptionLabel, "LZ4KD / LZ4KD_N");
+  assert.equal(body.compressionSharedInput, "lz4kd_enable");
+  assert.ok(body.zramDefaultAlgorithms.includes("lz4kd"));
   assert.equal(state.jobs.length, 0);
   assert.equal(state.calls.length, 0);
   assert.equal(JSON.stringify(body).includes("fixture-token"), false);
