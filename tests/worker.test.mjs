@@ -872,6 +872,7 @@ test("both compression codecs share one build flag while new defaults wait for k
       await t.test(`${workflow} compression=${enabled}`, async sub => {
         const { env, state } = await fixture(sub, { workflowBinding: workflow === "669aosp" ? "669aosp" : "623" });
         const options = worker.normalizeBuildOptions({ lz4kd_enable: enabled, zram_default_algorithm: "lz4kd_n" }, false);
+        options.zram_default_algorithm = "lz4kd_n";
         await worker.dispatchBuild(env, query, { serial, workflow, options });
         const [call] = dispatches(state);
         assert.equal(call.body.inputs.lz4kd_enable, enabled);

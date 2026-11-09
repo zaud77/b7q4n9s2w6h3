@@ -1147,6 +1147,8 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
     delete options.ccache_update;
     delete options.ccache_debug;
     options.hmbird_cpuperf_fix = options.hmbird_cpuperf_fix === "true" ? "true" : "false";
+    if (!ZRAM_VALUES.includes(options.zram_default_algorithm || "default"))
+      options.zram_default_algorithm = "default";
   } else delete options.hmbird_cpuperf_fix;
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
   if (!isAdmin(env, userId)) options.self_config = "false";
