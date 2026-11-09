@@ -168,7 +168,7 @@ const KSU_LABELS: Record<string, string> = {
 };
 const BBR_VALUES = ["false", "true", "default"];
 const DROID_VALUES = ["false", "standard", "extend"];
-const ZRAM_VALUES = ["default", "qpace-lz4", "qpace", "lz4kd"];
+const ZRAM_VALUES = ["default", "qpace-lz4", "qpace", "lz4kd", "lz4kd_n"];
 const ZRAM_LABELS: Record<string, string> = {
   default: "保持系统默认", "qpace-lz4": "qpace-lz4", qpace: "qpace", lz4kd: "lz4kd", lz4kd_n: "lz4kd_n",
 };

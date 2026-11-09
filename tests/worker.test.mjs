@@ -866,7 +866,7 @@ test("device-specific builds do not receive AOSP-only workflow inputs", async t 
   assert.equal(call.body.inputs.ccache_debug, "false");
 });
 
-test("both compression codecs share one build flag while new defaults wait for kernel promotion", async t => {
+test("both compression codecs share one build flag and AOSP forwards the selected codec", async t => {
   for (const workflow of ["623g", "669aosp"]) {
     for (const enabled of ["false", "true"]) {
       await t.test(`${workflow} compression=${enabled}`, async sub => {
@@ -877,14 +877,14 @@ test("both compression codecs share one build flag while new defaults wait for k
         const [call] = dispatches(state);
         assert.equal(call.body.inputs.lz4kd_enable, enabled);
         assert.equal(call.body.inputs.lz4kd_n_enable, undefined);
-        assert.equal(call.body.inputs.zram_default_algorithm, workflow === "669aosp" ? "default" : undefined);
+        assert.equal(call.body.inputs.zram_default_algorithm, workflow === "669aosp" ? "lz4kd_n" : undefined);
       });
     }
   }
 });
 
 test("ZRAM preferences retain only supported compressor and size choices", () => {
-  for (const algorithm of ["default", "qpace-lz4", "qpace", "lz4kd"])
+  for (const algorithm of ["default", "qpace-lz4", "qpace", "lz4kd", "lz4kd_n"])
     assert.equal(worker.normalizeBuildOptions({ zram_default_algorithm: algorithm }, false).zram_default_algorithm, algorithm);
   assert.equal(worker.normalizeBuildOptions({ zram_default_algorithm: "invalid" }, false).zram_default_algorithm, "default");
   for (const size of ["default", "4", "6", "8", "10", "12", "16", "24", "32"])
