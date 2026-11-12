@@ -60,6 +60,10 @@ jobs:
               and .kernelBuildsReady == true
               and .nomountBuildsReady == true
               and .privateBuildsReady == true
+              and .kernel66BuildsReady == true
+              and (.kernel66Profiles | length) == 8
+              and (.kernel66Features | length) == 5
+              and .kernel66HmbirdDefault == true
               and .kernelRepository == "zaud77/k6r9m2p7v4x8"
               and .nomountRepository == "zaud77/m8v3p6r9x2k4"
               and .dailyBuildLimit == 2

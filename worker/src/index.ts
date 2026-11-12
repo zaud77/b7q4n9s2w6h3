@@ -12,11 +12,14 @@ type Env = {
   ADMIN_USER_IDS: string;
   GITHUB_REPO: string;
   GITHUB_REF: string;
+  KERNEL66_GITHUB_REPO?: string;
+  KERNEL66_GITHUB_REF?: string;
   LKM_GITHUB_REPO: string;
   LKM_GITHUB_REF: string;
   LKM_GITHUB_TOKEN?: string;
   PRIVATE_BUILD_TOKEN?: string;
   PRIVATE_KERNEL_REPOSITORY?: string;
+  PRIVATE_KERNEL66_REPOSITORY?: string;
   PRIVATE_LKM_REPOSITORY?: string;
   BUILD_COOLDOWN_SECONDS: string;
   DAILY_BUILD_LIMIT: string;
@@ -71,6 +74,14 @@ const ADMIN_COMMANDS = [
   { command: "joinlink", description: "获取入群验证链接" },
 ];
 const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]> = {
+  "6630": ["6.6.30 · SM8750", { oki: ["默认风驰", "6630"] }],
+  "6656": ["6.6.56 · SM8750", { oki: ["默认风驰", "6656"] }],
+  "6657": ["6.6.57 · SM8750", { oki: ["默认风驰", "6657"] }],
+  "6666": ["6.6.66 · SM8750", { oki: ["默认风驰", "6666"] }],
+  "6689": ["6.6.89 · SM8750", { oki: ["默认风驰", "6689"] }],
+  "66118": ["6.6.118 · SM8750", { oki: ["默认风驰", "66118"] }],
+  "6650m": ["6.6.50 · MT6991", { oki: ["默认风驰", "6650m"] }],
+  "6689m": ["6.6.89 · MT6991", { oki: ["默认风驰", "6689m"] }],
   "669aosp": ["6.12.69·AOSP", {
     gki: ["通用 GKI", "669aosp"],
   }],
@@ -98,6 +109,14 @@ const SCRIPTS: Record<string, [string, Record<string, [string, string]> | null]>
   }],
 };
 const WORKFLOWS: Record<string, [string, string]> = {
+  "6630": ["6.6.30 · SM8750", "build_6.6.30_oki.yml"],
+  "6656": ["6.6.56 · SM8750", "build_6.6.56_oki.yml"],
+  "6657": ["6.6.57 · SM8750", "build_6.6.57_oki.yml"],
+  "6666": ["6.6.66 · SM8750", "build_6.6.66_oki.yml"],
+  "6689": ["6.6.89 · SM8750", "build_6.6.89_oki.yml"],
+  "66118": ["6.6.118 · SM8750", "build_6.6.118_oki.yml"],
+  "6650m": ["6.6.50 · MT6991", "build_6.6.50_mtk_oki.yml"],
+  "6689m": ["6.6.89 · MT6991", "build_6.6.89_mtk_oki.yml"],
   "669aosp": ["6.12.69·AOSP", "build_aosp_6.12.69_gki.yml"],
   "623g": ["6.12.23 · OnePlus 15 · 金标", "fastbuild_6.12.23_oneplus_15_hmbird_gold.yml"],
   "623p": ["6.12.23 · OnePlus 15 · 紫标", "fastbuild_6.12.23_oneplus_15_hmbird_purple.yml"],
@@ -118,6 +137,13 @@ const WORKFLOW_SCRIPTS: Record<string, string> = Object.fromEntries(
 const ONEPLUS_15_WORKFLOW_KEYS = new Set(["623g", "623p"]);
 const ONEPLUS_15T_WORKFLOW_KEYS = new Set(["638tg", "638tp"]);
 const AOSP_WORKFLOW_KEY = "669aosp";
+const KERNEL66_WORKFLOW_KEYS = new Set(["6630", "6656", "6657", "6666", "6689", "66118", "6650m", "6689m"]);
+const KERNEL66_FEATURES = new Set(["susfs_enable", "lz4_enable", "unicode_enable", "adios_enable", "baseband_guard"]);
+const KERNEL66_OPTIONS = new Set([...KERNEL66_FEATURES, "ksu_type"]);
+
+function kernel66Options(options: Record<string, string>): Record<string, string> {
+  return Object.fromEntries([...KERNEL66_OPTIONS].map(key => [key, options[`kernel66_${key}`] || (key === "ksu_type" ? "bakasu" : "true")]));
+}
 const AOSP_WORKFLOW_KEYS = new Set([AOSP_WORKFLOW_KEY]);
 const AOSP_BOOL_OPTIONS = new Set(["zram_writeback_enable", "qpace_enable", "hmbird_cpuperf_fix"]);
 const AOSP_OPTIONS = new Set([...AOSP_BOOL_OPTIONS, "zram_default_algorithm", "zram_size_gib"]);
@@ -208,6 +234,11 @@ function normalizeBuildOptions(saved: unknown, admin: boolean): Record<string, s
   const options = defaults();
   if (!saved || typeof saved !== "object" || Array.isArray(saved)) return options;
   const values = saved as Record<string, unknown>;
+  for (const key of KERNEL66_OPTIONS) {
+    const value = values[`kernel66_${key}`];
+    if (typeof value === "string" && (key === "ksu_type" ? KSU_VALUES : ["true", "false"]).includes(value))
+      options[`kernel66_${key}`] = value;
+  }
   for (const key of Object.keys(BOOL_LABELS)) {
     if (key === "self_config" && !admin) continue;
     if (values[key] === "true" || values[key] === "false") options[key] = values[key];
@@ -285,6 +316,7 @@ function applyWorkflowDefaults(workflowKey: string, options: Record<string, stri
   return options;
 }
 function optionsPrompt(workflowKey: string, prefix = "已选择"): string {
+  if (KERNEL66_WORKFLOW_KEYS.has(workflowKey)) return `${prefix}：${WORKFLOWS[workflowKey][0]}\n风驰默认启用；勾选项为开启。无内置管理器时不集成 SUSFS。`;
   return `${prefix}：${WORKFLOWS[workflowKey][0]}\n勾选项为开启；SUSFS 与 NoMount 自动互斥。`;
 }
 function variantPrompt(scriptKey: string, prefix = "已选择"): string {
@@ -766,9 +798,12 @@ async function resetSerialQuota(env: Env, serial: string): Promise<number | null
 }
 
 function optionsMarkup(options: Record<string, string>, showSelf: boolean, workflowKey = "") {
+  const kernel66 = KERNEL66_WORKFLOW_KEYS.has(workflowKey);
+  if (kernel66) options = kernel66Options(options);
   const rows: any[] = [];
   for (const keys of BOOL_OPTION_ROWS) {
     const row = keys
+      .filter(key => !kernel66 || KERNEL66_FEATURES.has(key))
       .filter(key => key !== "self_config" || showSelf)
       .filter(key => !AOSP_BOOL_OPTIONS.has(key) || AOSP_WORKFLOW_KEYS.has(workflowKey))
       .map(key => ({
@@ -788,7 +823,7 @@ function optionsMarkup(options: Record<string, string>, showSelf: boolean, workf
     text: `ZRAM 大小：${ZRAM_SIZE_LABELS[options.zram_size_gib] || ZRAM_SIZE_LABELS.default}`,
     callback_data: `set:zram_size_gib:${nextValue(ZRAM_SIZE_VALUES, options.zram_size_gib || "default")}`,
   }]);
-  rows.push([
+  if (!kernel66) rows.push([
     { text: `BBR3：${bbrLabel[options.bbr_enable] || options.bbr_enable}`, callback_data: `set:bbr_enable:${nextValue(["false", "true", "default"], options.bbr_enable)}` },
     { text: `Droidspaces：${droidLabel[options.droidspaces_enable] || options.droidspaces_enable}`, callback_data: `set:droidspaces_enable:${nextValue(["false", "standard", "extend"], options.droidspaces_enable)}` },
   ]);
@@ -866,11 +901,14 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   const fields: Array<[string, string]> = [[key, value]];
   if (value === "true" && key === "susfs_enable") fields.push(["nomount_enable", "false"]);
   if (value === "true" && key === "nomount_enable") fields.push(["susfs_enable", "false"]);
-  const jsonArgs = fields.map(() => "?, ?").join(", ");
-  const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.${name}`, next]);
+  const kernel66Keys = [...KERNEL66_WORKFLOW_KEYS].map(value => `'${value}'`).join(",");
+  const kernel66Condition = `json_extract(data,'$.workflow') IN (${kernel66Keys})`;
+  const jsonArgs = fields.map(() => `CASE WHEN ${kernel66Condition} THEN ? ELSE ? END, ?`).join(", ");
+  const params: Array<string | number> = fields.flatMap(([name, next]) => [`$.options.kernel66_${name}`, `$.options.${name}`, next]);
   params.push(now(), userId);
-  const workflowGuard = key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp')"
-    : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow')='669aosp'" : "";
+  const workflowGuard = (key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp')"
+    : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow')='669aosp'" : "")
+    + (KERNEL66_OPTIONS.has(key) ? "" : ` AND NOT (${kernel66Condition})`);
   const menuGuard = " AND (json_extract(data,'$.menuMessageId') IS NULL OR (json_extract(data,'$.menuMessageId')=? AND json_extract(data,'$.menuChatId')=?))";
   params.push(messageId, Number(chatId));
   const result: any = await env.DB.prepare(
@@ -1140,7 +1178,9 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   if (quotaMessage) { await editMessage(env, chatId, messageId, quotaMessage); return; }
   if (await workflowMaintenance(env, workflowKey)) { await editMessage(env, chatId, messageId, `${WORKFLOWS[workflowKey][0]} 正在建立持久缓存，暂时不能提交构建。`); return; }
   const selectedOptions = { ...(session.options || defaults()) };
-  const options = { ...selectedOptions };
+  const kernel66 = KERNEL66_WORKFLOW_KEYS.has(workflowKey);
+  const options = kernel66 ? kernel66Options(selectedOptions) : { ...selectedOptions };
+  for (const key of Object.keys(options)) if (key.startsWith("kernel66_")) delete options[key];
   delete options.zarm_tool;
   if (!AOSP_WORKFLOW_KEYS.has(workflowKey)) for (const key of AOSP_OPTIONS) delete options[key];
   if (workflowKey === AOSP_WORKFLOW_KEY) {
@@ -1151,14 +1191,18 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
       options.zram_default_algorithm = "default";
   } else delete options.hmbird_cpuperf_fix;
   if (options.ksu_type === "kowx") options.ksu_type = "kowsu";
-  if (!isAdmin(env, userId)) options.self_config = "false";
+  if (!isAdmin(env, userId) && !kernel66) options.self_config = "false";
   if (!supportsSelfConfig(workflowKey)) delete options.self_config;
   const requestId = (await digestSerial(env, `kernel:${userId}:${chatId}:${messageId}`)).slice(0, 16);
   const inputs = { ...options, device_serial: serial, build_request_id: requestId };
   const workflowFile = WORKFLOWS[workflowKey][1];
   if (!env.KERNEL_GITHUB_TOKEN) { await editMessage(env, chatId, messageId, "服务暂不可用，请稍后重试。"); return; }
-  const ref = env.GITHUB_REF;
-  const stored = { ...inputs, build_scope: buildScope(session), build_kind: "kernel", github_repo: env.GITHUB_REPO, github_ref: ref };
+  const repo = kernel66 ? env.KERNEL66_GITHUB_REPO : env.GITHUB_REPO;
+  const ref = kernel66 ? env.KERNEL66_GITHUB_REF || "main" : env.GITHUB_REF;
+  if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    await editMessage(env, chatId, messageId, "该构建入口暂不可用，请稍后重试。"); return;
+  }
+  const stored = { ...inputs, build_scope: buildScope(session), build_kind: "kernel", github_repo: repo, github_ref: ref };
   const created = now();
   try {
     await env.DB.prepare(
@@ -1168,7 +1212,7 @@ async function dispatchBuild(env: Env, query: any, session: Session) {
   } catch { await editMessage(env, chatId, messageId, "这次构建已登记或已有构建正在进行，请勿重复提交。"); return; }
   let response: Response;
   try {
-    response = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`, {
+    response = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${workflowFile}/dispatches`, {
       method: "POST", headers: ghHeaders(env),
       body: JSON.stringify({ ref, inputs }),
     });
@@ -1435,11 +1479,14 @@ async function handleCallback(env: Env, update: any) {
       return;
     }
   }
-  const options = session.options;
-  if (!options) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
+  const savedOptions = session.options;
+  if (!savedOptions) { await editMessage(env, chatId, messageId, "会话已失效，请重新使用 /build。"); return; }
+  const kernel66 = KERNEL66_WORKFLOW_KEYS.has(session.workflow || "");
+  const options = kernel66 ? kernel66Options(savedOptions) : savedOptions;
   delete options.zarm_tool;
   if (data.startsWith("toggle:")) {
     const key = data.slice(7); if (!BOOL_LABELS[key]) return;
+    if (kernel66 && !KERNEL66_FEATURES.has(key)) return;
     if (AOSP_BOOL_OPTIONS.has(key) && !AOSP_WORKFLOW_KEYS.has(session.workflow || "")) return;
     if (key === "self_config" && !isAdmin(env, userId)) { await editMessage(env, chatId, messageId, "该配置仅限所有者使用。"); return; }
     const value = options[key] === "true" ? "false" : "true";
@@ -1448,12 +1495,14 @@ async function handleCallback(env: Env, update: any) {
     if (value === "true" && key === "nomount_enable") options.susfs_enable = "false";
   } else if (data.startsWith("cycle:")) {
     const key = data.slice(6);
+    if (kernel66 && key !== "ksu_type") return;
     if (AOSP_OPTIONS.has(key) && !AOSP_WORKFLOW_KEYS.has(session.workflow || "")) return;
     const choices = key === "ksu_type" ? KSU_VALUES : key === "bbr_enable" ? BBR_VALUES : key === "droidspaces_enable" ? DROID_VALUES : key === "zram_default_algorithm" ? ZRAM_VALUES : key === "zram_size_gib" ? ZRAM_SIZE_VALUES : null;
     if (!choices) return; options[key] = choices[(choices.indexOf(options[key]) + 1) % choices.length];
   } else if (data === "dispatch") { await dispatchBuild(env, query, session); return; }
+  if (kernel66) for (const key of KERNEL66_OPTIONS) savedOptions[`kernel66_${key}`] = options[key];
   await setSession(env, userId, session);
-  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(options, isAdmin(env, userId) && supportsSelfConfig(session.workflow || ""), session.workflow) });
+  await tg(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: optionsMarkup(savedOptions, isAdmin(env, userId) && supportsSelfConfig(session.workflow || ""), session.workflow) });
 }
 
 async function handleJoinRequest(env: Env, update: any) {
@@ -1596,7 +1645,12 @@ async function downloadNoMountBuildAttestation(artifact: any, headers: Record<st
 }
 
 async function buildArtifactCatalog(env: Env, repo: string, run: any, runId: number, lkm: boolean) {
-  const privateRepo = lkm ? env.PRIVATE_LKM_REPOSITORY : env.PRIVATE_KERNEL_REPOSITORY;
+  const privateRepo = lkm ? env.PRIVATE_LKM_REPOSITORY
+    : repo === env.KERNEL66_GITHUB_REPO ? env.PRIVATE_KERNEL66_REPOSITORY : env.PRIVATE_KERNEL_REPOSITORY;
+  if (!lkm && repo !== env.GITHUB_REPO && repo !== env.KERNEL66_GITHUB_REPO)
+    throw new Error("Kernel repository binding changed");
+  if (!lkm && repo === env.KERNEL66_GITHUB_REPO && (!env.PRIVATE_BUILD_TOKEN || !privateRepo))
+    throw new Error("Kernel build artifact storage is not configured");
   if (env.PRIVATE_BUILD_TOKEN && privateRepo) {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(privateRepo) ||
         !Number.isSafeInteger(run.repository?.id) || run.repository.id <= 0 ||
@@ -1837,6 +1891,8 @@ export default {
         nomountBuildsReady: Boolean(env.LKM_GITHUB_TOKEN), nomountKernelSeries: Object.keys(NOMOUNT_KERNELS),
         kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN),
         privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY),
+        kernel66BuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN && env.KERNEL66_GITHUB_REPO && env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL66_REPOSITORY),
+        kernel66Profiles: [...KERNEL66_WORKFLOW_KEYS], kernel66Features: [...KERNEL66_FEATURES], kernel66HmbirdDefault: true,
         kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO,
         dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)),
         quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true,

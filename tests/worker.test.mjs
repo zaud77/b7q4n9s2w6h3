@@ -11,7 +11,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration, applyBuildPreferencesMigration, loadBuildPreferences };";
+  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration, applyBuildPreferencesMigration, loadBuildPreferences, kernel66Options, optionsMarkup };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -1382,4 +1382,80 @@ test("health reports deployed repository bindings without exposing credentials",
   assert.equal(configured.privateBuildsReady, true);
   assert.equal(JSON.stringify(configured).includes("private/"), false);
   assert.equal(JSON.stringify(configured).includes("private-fixture-token"), false);
+});
+
+test("6.6 menu contains only requested five switches with native HMBIRD enabled", () => {
+  const options = worker.normalizeBuildOptions({ nomount_enable: "true", kpm_enable: "true", self_config: "true" }, true);
+  const menu = worker.optionsMarkup(options, true, "66118").inline_keyboard.flat();
+  const switches = menu.filter(button => button.callback_data.startsWith("set:") && !button.callback_data.startsWith("set:ksu_type:"));
+  assert.deepEqual(switches.map(button => button.callback_data.split(":")[1]).sort(),
+    ["susfs_enable", "lz4_enable", "unicode_enable", "adios_enable", "baseband_guard"].sort());
+  assert.ok(switches.every(button => button.text.startsWith("✅")));
+  assert.ok(!menu.some(button => /BBR|Droidspaces|NoMount|NTSYNC|自用配置|LZ4KD|KPM/.test(button.text)));
+});
+
+test("6.6 artifact delivery requires its own private storage and preserves origin binding", async t => {
+  const { env, state, outer } = await deliveryFixture(t);
+  env.KERNEL66_GITHUB_REPO = "owner/kernel66";
+  const run = { run_attempt: 2, repository: { id: 123, full_name: env.KERNEL66_GITHUB_REPO } };
+  await assert.rejects(worker.buildArtifactCatalog(env, env.KERNEL66_GITHUB_REPO, run, 99, false), /not configured/);
+  assert.equal(state.calls.length, 0);
+  privateDelivery(env, state, outer, null, { origin: env.KERNEL66_GITHUB_REPO });
+  env.PRIVATE_KERNEL66_REPOSITORY = "private/kernel66";
+  const respond = state.githubResponse;
+  state.githubResponse = (url, request) => {
+    assert.ok(!url.includes("/repos/private/lkm"));
+    assert.ok(!url.includes("/repos/private/kernel/"));
+    return respond(url.replace("/repos/private/kernel66", "/repos/private/lkm"), request);
+  };
+  const catalog = await worker.buildArtifactCatalog(env, env.KERNEL66_GITHUB_REPO, run, 99, false);
+  assert.equal(catalog.artifacts.length, 1);
+  assert.match(catalog.artifacts[0].archive_download_url, /private\/kernel66\/releases\/assets\/201$/);
+  await assert.rejects(worker.buildArtifactCatalog(env, "owner/unrelated", run, 99, false), /binding changed/);
+  await assert.rejects(worker.buildArtifactCatalog(env, env.KERNEL66_GITHUB_REPO,
+    { ...run, repository: { ...run.repository, full_name: "owner/wrong" } }, 99, false), /binding is invalid/);
+});
+
+test("6.6 preferences remain independent from 6.12 and persist validated prefixed values", () => {
+  const options = worker.normalizeBuildOptions({ susfs_enable: "false", adios_enable: "false",
+    kernel66_susfs_enable: "true", kernel66_adios_enable: "false", kernel66_ksu_type: "kowsu",
+    kernel66_baseband_guard: "invalid" }, false);
+  const selected = worker.kernel66Options(options);
+  assert.equal(options.susfs_enable, "false");
+  assert.equal(selected.susfs_enable, "true");
+  assert.equal(selected.adios_enable, "false");
+  assert.equal(selected.ksu_type, "kowsu");
+  assert.equal(selected.baseband_guard, "true");
+});
+
+test("all eight 6.6 versions dispatch only their schema to independent repository", async t => {
+  const { env, state } = await fixture(t);
+  env.KERNEL66_GITHUB_REPO = "zaud77/n6r2k8v5p9x3";
+  env.KERNEL66_GITHUB_REF = "main";
+  const versions = { "6630": "6.6.30", "6656": "6.6.56", "6657": "6.6.57", "6666": "6.6.66",
+    "6689": "6.6.89", "66118": "6.6.118", "6650m": "6.6.50_mtk", "6689m": "6.6.89_mtk" };
+  for (const [workflow, version] of Object.entries(versions)) {
+    state.jobs.length = 0;
+    state.workflowBinding = workflow;
+    const options = worker.normalizeBuildOptions({ nomount_enable: "true", kpm_enable: "true", self_config: "true",
+      ntsync_enable: "true", kernel66_ksu_type: "bakasu" }, true);
+    await worker.dispatchBuild(env, query, { serial, workflow, options });
+    const call = dispatches(state).at(-1);
+    assert.equal(call.url, `https://api.github.com/repos/zaud77/n6r2k8v5p9x3/actions/workflows/build_${version}_oki.yml/dispatches`);
+    assert.deepEqual(Object.keys(call.body.inputs).sort(), ["ksu_type", "susfs_enable", "lz4_enable", "unicode_enable",
+      "adios_enable", "baseband_guard", "device_serial", "build_request_id"].sort());
+    for (const feature of ["susfs_enable", "lz4_enable", "unicode_enable", "adios_enable", "baseband_guard"])
+      assert.equal(call.body.inputs[feature], "true");
+    assert.equal(JSON.parse(state.jobs[0].inputs).github_repo, env.KERNEL66_GITHUB_REPO);
+  }
+});
+
+test("6.6 session data never leaks prefixed settings into existing 6.12 dispatch", async t => {
+  const { env, state } = await fixture(t);
+  const options = worker.normalizeBuildOptions({ kernel66_susfs_enable: "true", susfs_enable: "false" }, false);
+  await worker.dispatchBuild(env, query, { serial, workflow: "623g", options });
+  const call = dispatches(state)[0];
+  assert.ok(call.url.includes("/k6r9m2p7v4x8/"));
+  assert.equal(call.body.inputs.susfs_enable, "false");
+  assert.ok(!Object.keys(call.body.inputs).some(key => key.startsWith("kernel66_")));
 });
