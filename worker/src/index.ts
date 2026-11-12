@@ -908,7 +908,7 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
   params.push(now(), userId);
   const workflowGuard = (key === "self_config" ? " AND json_extract(data,'$.workflow') IN ('623g','623p','669aosp')"
     : AOSP_OPTIONS.has(key) ? " AND json_extract(data,'$.workflow')='669aosp'" : "")
-    + (KERNEL66_OPTIONS.has(key) ? "" : ` AND NOT (${kernel66Condition})`);
+    + (KERNEL66_OPTIONS.has(key) && admin ? "" : ` AND NOT (${kernel66Condition})`);
   const menuGuard = " AND (json_extract(data,'$.menuMessageId') IS NULL OR (json_extract(data,'$.menuMessageId')=? AND json_extract(data,'$.menuChatId')=?))";
   params.push(messageId, Number(chatId));
   const result: any = await env.DB.prepare(
@@ -918,6 +918,7 @@ async function persistQuickOption(env: Env, userId: number, data: string, admin:
 }
 async function workflowMarkup(env: Env, userId: number, includeOwnerNoMount = false) {
   const rows = Object.entries(SCRIPTS)
+    .filter(([key]) => !KERNEL66_WORKFLOW_KEYS.has(key) || isAdmin(env, userId))
     .map(([key, value]) => [{ text: value[0], callback_data: `kernel:${key}` }]);
   if (includeOwnerNoMount) rows.push([{ text: "独立 NoMount 模块（LKM）", callback_data: "owner_nomount" }]);
   rows.push([{ text: "取消", callback_data: "cancel" }]);
@@ -1031,7 +1032,7 @@ async function handleCommand(env: Env, update: any, command: string, args: strin
     const options = await loadBuildPreferences(env, userId, isAdmin(env, userId));
     const session: Session = { serial, options };
     if (bound) {
-      if (!SCRIPTS[bound]) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
+      if (!SCRIPTS[bound] || KERNEL66_WORKFLOW_KEYS.has(bound)) { await sendMessage(env, chatId, "已绑定的构建脚本当前不可用，请联系管理员。"); return; }
       const variants = SCRIPTS[bound][1];
       const workflowKeys = variants ? Object.values(variants).map(([, key]) => key) : [bound];
       for (const key of workflowKeys) {
@@ -1165,6 +1166,9 @@ async function handleText(env: Env, update: any) {
 
 async function dispatchBuild(env: Env, query: any, session: Session) {
   const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
+  if (KERNEL66_WORKFLOW_KEYS.has(session.workflow || "") && !isAdmin(env, userId)) {
+    await clearSession(env, userId); await editMessage(env, chatId, messageId, "该构建入口仅限所有者使用。"); return;
+  }
   if (await activeBuild(env, userId)) { await editMessage(env, chatId, messageId, "当前正在构建内核，请等待本次构建完成。"); return; }
   const serial = session.serial || ""; const workflowKey = session.workflow || "";
   if (!WORKFLOWS[workflowKey] || !(await serialRecord(env, serial)) || !(await isMember(env, userId))) {
@@ -1339,6 +1343,9 @@ async function handleCallback(env: Env, update: any) {
   const query = update.callback_query; const userId = query.from.id; const chatId = query.message.chat.id; const messageId = query.message.message_id;
   await answerCallback(env, query.id);
   const data = query.data || "";
+  if (!isAdmin(env, userId) && /^(kernel|variant|bind):/.test(data) && KERNEL66_WORKFLOW_KEYS.has(data.split(":")[1])) {
+    await editMessage(env, chatId, messageId, "该构建入口仅限所有者使用。"); return;
+  }
   if (data.startsWith("nomount_kernel:")) {
     const [, series, requestId] = data.split(":");
     const session = await getSession(env, userId);
@@ -1389,6 +1396,9 @@ async function handleCallback(env: Env, update: any) {
     return;
   }
   const session = await getSession(env, userId);
+  if (!isAdmin(env, userId) && data !== "cancel" && (KERNEL66_WORKFLOW_KEYS.has(session.workflow || "") || KERNEL66_WORKFLOW_KEYS.has(session.selectedScript || ""))) {
+    await clearSession(env, userId); await editMessage(env, chatId, messageId, "该构建入口仅限所有者使用。"); return;
+  }
   if (session.menuMessageId != null && (session.menuMessageId !== messageId || session.menuChatId !== Number(chatId))) {
     await editMessage(env, chatId, messageId, "该菜单已失效，请使用最新的构建菜单。"); return;
   }
@@ -1892,7 +1902,7 @@ export default {
         kernelBuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN),
         privateBuildsReady: Boolean(env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL_REPOSITORY && env.PRIVATE_LKM_REPOSITORY),
         kernel66BuildsReady: Boolean(env.KERNEL_GITHUB_TOKEN && env.KERNEL66_GITHUB_REPO && env.PRIVATE_BUILD_TOKEN && env.PRIVATE_KERNEL66_REPOSITORY),
-        kernel66Profiles: [...KERNEL66_WORKFLOW_KEYS], kernel66Features: [...KERNEL66_FEATURES], kernel66HmbirdDefault: true,
+        kernel66Profiles: [...KERNEL66_WORKFLOW_KEYS], kernel66Features: [...KERNEL66_FEATURES], kernel66HmbirdDefault: true, kernel66OwnerOnly: true,
         kernelRepository: env.GITHUB_REPO, nomountRepository: env.LKM_GITHUB_REPO,
         dailyBuildLimit: Math.max(1, Math.floor(Number(env.DAILY_BUILD_LIMIT) || 2)),
         quotaIncludesAdmins: false, adminParallelBuilds: true, aospMainline: true,

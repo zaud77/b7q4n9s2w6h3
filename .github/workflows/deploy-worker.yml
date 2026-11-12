@@ -64,6 +64,7 @@ jobs:
               and (.kernel66Profiles | length) == 8
               and (.kernel66Features | length) == 5
               and .kernel66HmbirdDefault == true
+              and .kernel66OwnerOnly == true
               and .kernelRepository == "zaud77/k6r9m2p7v4x8"
               and .nomountRepository == "zaud77/m8v3p6r9x2k4"
               and .dailyBuildLimit == 2

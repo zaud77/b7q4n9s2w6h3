@@ -11,7 +11,7 @@ import { zipSync, strToU8 } from "fflate";
 const require = createRequire(import.meta.url);
 const source = (await readFile(new URL("../worker/src/index.ts", import.meta.url), "utf8"))
   .replace('from "fflate"', `from ${JSON.stringify(pathToFileURL(require.resolve("fflate")).href)}`)
-  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration, applyBuildPreferencesMigration, loadBuildPreferences, kernel66Options, optionsMarkup };";
+  + "\nexport { handleCommand, handleCallback, handleText, handleJoinRequest, dispatchBuild, dispatchNoMountBuild, nomountInputs, validateNoMountPackage, processJob, buildArtifactCatalog, downloadBuildArtifact, ghHeaders, digestSerial, buildQuotaMessage, beijingDayBounds, unwrapArtifact, NOMOUNT_PACKAGE_RE, normalizeBuildOptions, applyAospMainlineMigration, applyBuildPreferencesMigration, loadBuildPreferences, kernel66Options, optionsMarkup, workflowMarkup };";
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const worker = await import("data:text/javascript;base64," + Buffer.from(compiled.outputText).toString("base64"));
 const requestId = "a123456789012345";
@@ -1430,6 +1430,7 @@ test("6.6 preferences remain independent from 6.12 and persist validated prefixe
 
 test("all eight 6.6 versions dispatch only their schema to independent repository", async t => {
   const { env, state } = await fixture(t);
+  env.ADMIN_USER_IDS = "42";
   env.KERNEL66_GITHUB_REPO = "zaud77/n6r2k8v5p9x3";
   env.KERNEL66_GITHUB_REF = "main";
   const versions = { "6630": "6.6.30", "6656": "6.6.56", "6657": "6.6.57", "6666": "6.6.66",
@@ -1448,6 +1449,40 @@ test("all eight 6.6 versions dispatch only their schema to independent repositor
       assert.equal(call.body.inputs[feature], "true");
     assert.equal(JSON.parse(state.jobs[0].inputs).github_repo, env.KERNEL66_GITHUB_REPO);
   }
+});
+
+test("6.6 entries appear only for the owner and regular users cannot forge selection or dispatch", async t => {
+  const { env, state } = await fixture(t);
+  const keys = ["6630", "6656", "6657", "6666", "6689", "66118", "6650m", "6689m"];
+  const visible = async id => (await worker.workflowMarkup(env, id)).inline_keyboard.flat().map(button => button.callback_data);
+  for (const key of keys) {
+    assert.ok(!(await visible(42)).includes(`kernel:${key}`));
+    assert.ok((await visible(1)).includes(`kernel:${key}`));
+    for (const data of [`kernel:${key}`, `variant:${key}:oki`, `bind:${key}`]) {
+      state.sessions.set(42, JSON.stringify({ serial, selectedScript: key }));
+      await worker.handleCallback(env, { callback_query: { ...query, id: "private-entry", data } });
+      assert.match(state.calls.at(-1).body.text, /仅限所有者/);
+    }
+    await worker.dispatchBuild(env, query, { serial, workflow: key, options: {} });
+    assert.match(state.calls.at(-1).body.text, /仅限所有者/);
+  }
+  assert.equal(dispatches(state).length, 0);
+  assert.equal(state.jobs.length, 0);
+  assert.equal(state.workflowBinding, "623");
+});
+
+test("regular users cannot change a stale 6.6 draft through quick option callbacks", async t => {
+  const { env, database, timestamp } = await quotaFixture(t);
+  const draft = { serial, workflow: "66118", options: { kernel66_susfs_enable: "false" }, menuMessageId: 7, menuChatId: 42 };
+  database.prepare("INSERT OR REPLACE INTO sessions VALUES(?,?,?)").run(42, JSON.stringify(draft), timestamp);
+  const click = () => worker.handleCallback(env, { callback_query: { ...query, id: "private-option", data: "set:susfs_enable:true",
+    message: { ...query.message, reply_markup: { inline_keyboard: [[{ text: "SUSFS", callback_data: "set:susfs_enable:true" }]] } } } });
+  const value = () => JSON.parse(database.prepare("SELECT data FROM sessions WHERE telegram_user_id=42").get().data).options.kernel66_susfs_enable;
+  await click();
+  assert.equal(value(), "false");
+  env.ADMIN_USER_IDS = "42";
+  await click();
+  assert.equal(value(), "true");
 });
 
 test("6.6 session data never leaks prefixed settings into existing 6.12 dispatch", async t => {
